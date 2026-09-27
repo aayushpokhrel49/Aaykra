@@ -442,7 +442,7 @@ pub(crate) fn perform_update(
         #[allow(clippy::disallowed_methods, reason = "doesn't run in the main binary")]
         let _child = zed_launch_command(app_dir, launch_arguments)
             .spawn()
-            .context("Failed to launch Aayushi Code after update")?;
+            .context("Failed to launch Aaykra after update")?;
     }
     log::info!("Update completed successfully");
     Ok(())
@@ -458,7 +458,7 @@ mod test {
     fn test_zed_launch_command_preserves_arguments() {
         let arguments = vec![
             OsString::from("--user-data-dir"),
-            OsString::from(r"C:\Aayushi Code Data"),
+            OsString::from(r"C:\Aaykra Data"),
         ];
         let command = zed_launch_command(Path::new(r"C:\Program Files\AAYKRA"), &arguments);
 

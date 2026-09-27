@@ -163,7 +163,7 @@ impl NodeRuntime {
                 Ok(instance) => {
                     log::log!(
                         log_level,
-                        "using Aayushi Code managed Node.js at {} since {}",
+                        "using Aaykra managed Node.js at {} since {}",
                         instance.installation_path.display(),
                         why_using_managed
                     );

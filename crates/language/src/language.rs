@@ -1249,14 +1249,14 @@ impl LanguageScope {
     /// Returns additional regex patterns that act as prefix markers for creating
     /// boundaries during rewrapping.
     ///
-    /// By default, Aayushi Code treats as paragraph and comment prefixes as boundaries.
+    /// By default, Aaykra treats as paragraph and comment prefixes as boundaries.
     pub fn rewrap_prefixes(&self) -> &[Regex] {
         &self.language.config.rewrap_prefixes
     }
 
     /// Returns a list of language-specific word characters.
     ///
-    /// By default, Aayushi Code treats alphanumeric characters (and '_') as word characters for
+    /// By default, Aaykra treats alphanumeric characters (and '_') as word characters for
     /// the purpose of actions like 'move to next word end` or whole-word search.
     /// It additionally accounts for language's additional word characters.
     pub fn word_characters(&self) -> Option<&HashSet<char>> {

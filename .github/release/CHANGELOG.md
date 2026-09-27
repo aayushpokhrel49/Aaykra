@@ -1,14 +1,16 @@
 # Changelog
 
-All notable user-facing changes to Aayushi Code are listed here, newest first. Add a
+All notable user-facing changes to Aaykra are listed here, newest first. Add a
 bullet under Unreleased with your change; the version bump commit turns that
 section into the release, and the release workflow copies it into the GitHub
 release body.
 
-## Unreleased
+## 1.0.70 - 2026-09-27
 
-- Renamed the in-project config folder to `.aaykra` for `settings.json`, `tasks.json`, and `debug.json`, and the remote server folders to `.aaykra_server`/`.aaykra_wsl_server`. Existing `.aayushicode` (and older `.zed`) folders are still picked up as a fallback, so no project needs to be migrated by hand.
-- Fixed auto-update for installs that predate the AAYKRA rebrand: each release now also publishes the legacy `aayushicode-*`/`AayushiCode-*` asset names, and the updater falls back to them when the `aaykra-*` asset is missing.
+- Renamed the editor to AAYKRA throughout: the crate, the `aaykra` binary and CLI, the `aaykra://` URL scheme, the data directories, the app menus, the About window, and every release artifact. Installs that predate the rename keep using their existing `Aayushi Code` directories, and the pre-rename `aayushicode://` links and CLI handshake still work.
+- Fixed the pre-rename `.aayushicode` project-config fallback: the worktree file scanner, the debug scenario path, and the debug modal once again recognize `.aayushicode` alongside `.aaykra`.
+- Renamed the in-project config folder to `.aaykra` for `settings.json`, `tasks.json`, and `debug.json`, and the remote server folders to `.aaykra_server`/`.aaykra_wsl_server`. Existing `.aaykra` (and older `.zed`) folders are still picked up as a fallback, so no project needs to be migrated by hand.
+- Fixed auto-update for installs that predate the AAYKRA rebrand: each release now also publishes the legacy `aaykra-*`/`Aaykra-*` asset names, and the updater falls back to them when the `aaykra-*` asset is missing.
 - Pointed every in-app documentation link (settings, themes, key bindings, tasks, debugger, git, remote development, extensions, and troubleshooting) at https://code.aayushpokhrel.info.np/docs.
 
 ## 1.0.60 - 2026-09-24
@@ -18,7 +20,7 @@ release body.
 
 ## 1.0.50 - 2026-09-23
 
-- Rebranded the editor from Aayushi Code to AAYKRA across the UI: app menus, welcome and onboarding screens, About window, notifications, settings descriptions, theme and icon-theme names, and installer/desktop display names. Core identifiers, data directories, and protocol strings are unchanged.
+- Rebranded the editor from Aaykra to AAYKRA across the UI: app menus, welcome and onboarding screens, About window, notifications, settings descriptions, theme and icon-theme names, and installer/desktop display names. Core identifiers, data directories, and protocol strings are unchanged.
 
 ## 1.0.40 - 2026-09-21
 
@@ -32,16 +34,16 @@ release body.
 ## 1.0.20 - 2026-09-19
 
 - Fixed automatic update downloads failing with "operation timed out"; downloads and update checks now retry and time out gracefully.
-- Improved update notifications: once an update is downloaded, Aayushi Code shows an "Update Now" prompt on every launch until you apply it.
+- Improved update notifications: once an update is downloaded, Aaykra shows an "Update Now" prompt on every launch until you apply it.
 - Cleaned up the About window to show only the app version and links to the website, GitHub, X, and email.
 
 ## 1.0.10 - 2026-09-18
 
-- Added proper credit to Zed Industries in the README, acknowledging that Aayushi Code is a fork of Zed and is built on top of its code.
+- Added proper credit to Zed Industries in the README, acknowledging that Aaykra is a fork of Zed and is built on top of its code.
 
 ## 1.0.9 - 2026-09-18
 
-- Renamed the product, binary, and installer to Aayushi Code / aayushicode. New install paths, app names, and data directories (existing Aayushi Code data is reused; no re-setup needed).
+- Renamed the product, binary, and installer to Aaykra / aaykra. New install paths, app names, and data directories (existing Aaykra data is reused; no re-setup needed).
 - Fixed macOS release builds: the Intel build now runs on the supported `macos-15-intel` runner and the Apple Silicon build on `macos-15`.
 - Fixed the Arch Linux package build: the `.pkg.tar.zst` is written to an absolute path under the repo's `target/release` so packaging no longer fails.
 - The release workflow can now be triggered manually ("Run workflow" with a version) in addition to tag pushes, and it publishes every platform package that builds successfully.
@@ -57,7 +59,7 @@ release body.
 
 ## 1.0.7 - 2026-09-11
 
-- Files that were deleted while Aayushi Code was closed reopen as strikethrough tabs with a "file not found" message instead of a blank editor.
+- Files that were deleted while Aaykra was closed reopen as strikethrough tabs with a "file not found" message instead of a blank editor.
 - Tabs show the file's icon before its name.
 - The project panel's Delete action moves files to the Trash, with a separate Delete Permanently option.
 - Activity bar icons match VS Code's, with more vertical spacing, and all left-dock panels share one width.

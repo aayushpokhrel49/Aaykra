@@ -24,7 +24,7 @@ use ui::{
 };
 use util::paths::PathExt;
 use workspace::Workspace;
-use aayushicode_actions::{ToggleEnableBreakpoint, UnsetBreakpoint};
+use aaykra_actions::{ToggleEnableBreakpoint, UnsetBreakpoint};
 
 actions!(
     debugger,

@@ -45,7 +45,7 @@ ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 worktree.workspace = true
-aayushicode_actions.workspace = true
+aaykra_actions.workspace = true
 indoc.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]

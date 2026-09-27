@@ -455,15 +455,15 @@ pub struct GitSettings {
     /// When the resolved directory is outside the project root, the
     /// project's directory name is automatically appended so that
     /// sibling repos don't collide. For example, with the default
-    /// `"../worktrees"` and a project at `~/code/aayushicode`, worktrees are
-    /// created under `~/code/worktrees/aayushicode/`.
+    /// `"../worktrees"` and a project at `~/code/aaykra`, worktrees are
+    /// created under `~/code/worktrees/aaykra/`.
     ///
     /// When the resolved directory is inside the project root, no
     /// extra component is added (it's already project-scoped).
     ///
     /// Examples:
     /// - `"../worktrees"` — `~/code/worktrees/<project>/` (default)
-    /// - `".git/aayushicode-worktrees"` — `<project>/.git/aayushicode-worktrees/`
+    /// - `".git/aaykra-worktrees"` — `<project>/.git/aaykra-worktrees/`
     /// - `"my-worktrees"` — `<project>/my-worktrees/`
     ///
     /// Trailing slashes are ignored.

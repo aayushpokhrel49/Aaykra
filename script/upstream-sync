@@ -8,8 +8,8 @@
 # with base = last synced point (UPSTREAM_VERSION), ours = HEAD, theirs = the
 # new tag. The result is committed with HEAD as its only parent.
 #
-# Files Wu removed on purpose stay removed: upstream edits to files that no
-# longer exist here, and additions under dropped paths, are discarded and
+# Files Aaykra removed on purpose stay removed: upstream edits to files that
+# no longer exist here, and additions under dropped paths, are discarded and
 # listed. Anything else that conflicts is committed with conflict markers so
 # it can be resolved on the branch.
 #
@@ -23,9 +23,9 @@ target=${1:?usage: script/upstream-sync <zed-tag-or-sha>}
 UPSTREAM_URL=https://github.com/zed-industries/zed.git
 VERSION_FILE=UPSTREAM_VERSION
 
-# Upstream changes under these paths are discarded and Wu's files kept as they
-# are. Crates that Wu removed (present at the last synced point, absent in HEAD)
-# are dropped too, except the ones in REVIEW_PREFIXES.
+# Upstream changes under these paths are discarded and Aaykra's files kept as
+# they are. Crates that Aaykra removed (present at the last synced point,
+# absent in HEAD) are dropped too, except the ones in REVIEW_PREFIXES.
 DROPPED_PREFIXES=(
   .agents/ .cloudflare/ .factory/ .github/ .wezel/ .zed/
   assets/prompts/ assets/sounds/ ci/ docs/ extensions/ legal/ nix/ tooling/
@@ -34,11 +34,12 @@ DROPPED_PREFIXES=(
   livekit.yaml lychee.toml renovate.json REVIEWERS.conl
   GEMINI.md CONTRIBUTING.md CODE_OF_CONDUCT.md .mailmap .git-blame-ignore-revs
 )
-# crates/zed became crates/aayushicode. Rename detection maps most edits across, but
-# files Wu rewrote fall through here and need a human to port or discard them.
+# crates/zed became crates/aaykra. Rename detection maps most edits across, but
+# files Aaykra rewrote fall through here and need a human to port or discard
+# them.
 REVIEW_PREFIXES=(crates/zed/)
-# Always keep Wu's version of these.
-PINNED_FILES=(crates/aayushicode/RELEASE_CHANNEL)
+# Always keep Aaykra's version of these.
+PINNED_FILES=(crates/aaykra/RELEASE_CHANNEL)
 
 git_version=$(git version | sed -E 's/git version ([0-9]+\.[0-9]+).*/\1/')
 if [[ "$(printf '%s\n2.38\n' "$git_version" | sort -V | head -1)" != "2.38" ]]; then

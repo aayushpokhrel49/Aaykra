@@ -68,7 +68,7 @@ ui_input.workspace = true
 url.workspace = true
 util.workspace = true
 uuid.workspace = true
-aayushicode_actions.workspace = true
+aaykra_actions.workspace = true
 
 [dev-dependencies]
 client = { workspace = true, features = ["test-support"] }

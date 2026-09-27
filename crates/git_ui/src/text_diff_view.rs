@@ -77,7 +77,7 @@ impl TextDiffView {
         });
 
         let Some((source_buffer, expanded_selection_range)) = selection_data else {
-            log::warn!("There should always be at least one selection in Aayushi Code. This is a bug.");
+            log::warn!("There should always be at least one selection in Aaykra. This is a bug.");
             return None;
         };
 

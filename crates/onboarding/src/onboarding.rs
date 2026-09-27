@@ -24,7 +24,7 @@ use workspace::{
     item::{Item, ItemEvent},
     open_new, register_serializable_item, with_active_or_new_workspace,
 };
-use aayushicode_actions::OpenOnboarding;
+use aaykra_actions::OpenOnboarding;
 
 mod base_keymap_picker;
 mod basics_page;
@@ -33,7 +33,7 @@ mod theme_preview;
 
 /// Imports settings from Visual Studio Code.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = aayushicode)]
+#[action(namespace = aaykra)]
 #[serde(deny_unknown_fields)]
 pub struct ImportVsCodeSettings {
     #[serde(default)]
@@ -42,7 +42,7 @@ pub struct ImportVsCodeSettings {
 
 /// Imports settings from Cursor editor.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, Action)]
-#[action(namespace = aayushicode)]
+#[action(namespace = aaykra)]
 #[serde(deny_unknown_fields)]
 pub struct ImportCursorSettings {
     #[serde(default)]

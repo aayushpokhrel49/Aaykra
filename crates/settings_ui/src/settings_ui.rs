@@ -43,7 +43,7 @@ use workspace::{
     AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, WorkspaceSettings,
     client_side_decorations,
 };
-use aayushicode_actions::{
+use aaykra_actions::{
     OpenProjectSettings, OpenSettings, OpenSettingsAt, OpenSettingsAtTarget, OpenSettingsPage,
 };
 
@@ -1426,7 +1426,7 @@ fn render_settings_item_link(
                 .tooltip(Tooltip::text("Copy Link"))
                 .when_some(json_path, |this, path| {
                     this.on_click(cx.listener(move |this, _, _, cx| {
-                        let link = format!("aayushicode://settings/{}", path);
+                        let link = format!("aaykra://settings/{}", path);
                         cx.write_to_clipboard(ClipboardItem::new_string(link));
                         this.last_copied_link_path = Some(path);
                         cx.notify();
@@ -5687,7 +5687,7 @@ mod project_settings_update_tests {
         let fs = FakeFs::new(cx.executor());
         let tree = if let Some(settings_content) = initial_settings {
             json!({
-                ".aayushicode": {
+                ".aaykra": {
                     "settings.json": settings_content
                 },
                 "src": { "main.rs": "" }
@@ -5704,7 +5704,7 @@ mod project_settings_update_tests {
             (worktree.read(cx).id(), worktree.downgrade())
         });
 
-        let rel_path: Arc<RelPath> = RelPath::from_unix_str(".aayushicode/settings.json")
+        let rel_path: Arc<RelPath> = RelPath::from_unix_str(".aaykra/settings.json")
             .expect("valid path")
             .into_arc();
         let project_path = ProjectPath {
@@ -5934,7 +5934,7 @@ mod project_settings_update_tests {
 
         let file_content = setup
             .fs
-            .load("/project/.aayushicode/settings.json".as_ref())
+            .load("/project/.aaykra/settings.json".as_ref())
             .await
             .unwrap();
         assert_eq!(
@@ -5967,7 +5967,7 @@ mod project_settings_update_tests {
         setup
             .fs
             .save(
-                "/project/.aayushicode/settings.json".as_ref(),
+                "/project/.aaykra/settings.json".as_ref(),
                 &r#"{ "tab_size": 99 }"#.into(),
                 Default::default(),
             )

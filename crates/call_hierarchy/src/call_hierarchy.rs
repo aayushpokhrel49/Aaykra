@@ -26,7 +26,7 @@ use ui::{
 };
 use util::{ResultExt, paths::PathExt};
 use workspace::{DismissDecision, ModalView, Workspace};
-pub use aayushicode_actions::{ShowIncomingCalls, ShowOutgoingCalls, ToggleDirection};
+pub use aaykra_actions::{ShowIncomingCalls, ShowOutgoingCalls, ToggleDirection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CallHierarchyMode {

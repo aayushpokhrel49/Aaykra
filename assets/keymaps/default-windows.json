@@ -26,12 +26,12 @@
       "shift-escape": "workspace::ToggleZoom",
       "ctrl-o": "workspace::OpenFiles",
       "ctrl-k ctrl-o": "workspace::Open",
-      "ctrl-=": ["aayushicode::IncreaseBufferFontSize", { "persist": false }],
-      "ctrl-shift-=": ["aayushicode::IncreaseBufferFontSize", { "persist": false }],
-      "ctrl--": ["aayushicode::DecreaseBufferFontSize", { "persist": false }],
-      "ctrl-0": ["aayushicode::ResetBufferFontSize", { "persist": false }],
-      "ctrl-alt-,": "aayushicode::OpenSettingsFile",
-      "ctrl-q": "aayushicode::Quit",
+      "ctrl-=": ["aaykra::IncreaseBufferFontSize", { "persist": false }],
+      "ctrl-shift-=": ["aaykra::IncreaseBufferFontSize", { "persist": false }],
+      "ctrl--": ["aaykra::DecreaseBufferFontSize", { "persist": false }],
+      "ctrl-0": ["aaykra::ResetBufferFontSize", { "persist": false }],
+      "ctrl-alt-,": "aaykra::OpenSettingsFile",
+      "ctrl-q": "aaykra::Quit",
       "f4": "debugger::Start",
       "shift-alt-l": "lsp_tool::ToggleMenu",
       "ctrl-shift-alt-s": "workspace::ToggleWorktreeSecurity",
@@ -410,7 +410,7 @@
       "ctrl-f6": "workspace::FocusNextPart",
       // Change the default action on `menu::Confirm` by setting the parameter
       // "ctrl-alt-o": ["projects::OpenRecent", { "create_new_window": true }],
-      "f11": "aayushicode::ToggleFullScreen",
+      "f11": "aaykra::ToggleFullScreen",
       "ctrl-r": "projects::OpenRecent",
       // Change to open path modal for existing remote connection by setting the parameter
       // "ctrl-shift-alt-o": ["projects::OpenRemote", { "from_existing_connection": true }],
@@ -448,7 +448,7 @@
       "ctrl-shift-h": ["pane::DeploySearch", { "replace_enabled": true }],
       "ctrl-shift-t": "pane::ReopenClosedItem",
       "ctrl-k ctrl-p": "workspace::ReopenLastPicker",
-      "ctrl-k ctrl-s": "aayushicode::OpenKeymap",
+      "ctrl-k ctrl-s": "aaykra::OpenKeymap",
       "ctrl-k ctrl-t": "theme_selector::Toggle",
       "ctrl-k ctrl-shift-t": "theme::ToggleMode",
       "ctrl-alt-super-p": "settings_profile_selector::Toggle",
@@ -476,7 +476,7 @@
       "ctrl-k shift-right": "workspace::SwapPaneRight",
       "ctrl-k shift-up": "workspace::SwapPaneUp",
       "ctrl-k shift-down": "workspace::SwapPaneDown",
-      "ctrl-shift-x": "aayushicode::Extensions",
+      "ctrl-shift-x": "aaykra::Extensions",
       // All task parameters are captured and unchanged between reruns by default.
       // Use the `"reevaluate_context"` parameter to control this.
       "ctrl-shift-r": ["task::Rerun", { "reevaluate_context": false }],
@@ -1041,7 +1041,7 @@
       "ctrl-c": "keymap_editor::CopyAction",
       "ctrl-shift-c": "keymap_editor::CopyContext",
       "ctrl-t": "keymap_editor::ShowMatchingKeybinds",
-      "ctrl-e": "aayushicode::OpenKeymapFile",
+      "ctrl-e": "aaykra::OpenKeymapFile",
     },
   },
   {
@@ -1073,10 +1073,10 @@
     "context": "Onboarding",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-=": ["aayushicode::IncreaseUiFontSize", { "persist": false }],
-      "ctrl-+": ["aayushicode::IncreaseUiFontSize", { "persist": false }],
-      "ctrl--": ["aayushicode::DecreaseUiFontSize", { "persist": false }],
-      "ctrl-0": ["aayushicode::ResetUiFontSize", { "persist": false }],
+      "ctrl-=": ["aaykra::IncreaseUiFontSize", { "persist": false }],
+      "ctrl-+": ["aaykra::IncreaseUiFontSize", { "persist": false }],
+      "ctrl--": ["aaykra::DecreaseUiFontSize", { "persist": false }],
+      "ctrl-0": ["aaykra::ResetUiFontSize", { "persist": false }],
       "ctrl-enter": "onboarding::Finish",
     },
   },
@@ -1085,10 +1085,10 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-n": "workspace::NewFile",
-      "ctrl-=": ["aayushicode::IncreaseUiFontSize", { "persist": false }],
-      "ctrl-+": ["aayushicode::IncreaseUiFontSize", { "persist": false }],
-      "ctrl--": ["aayushicode::DecreaseUiFontSize", { "persist": false }],
-      "ctrl-0": ["aayushicode::ResetUiFontSize", { "persist": false }],
+      "ctrl-=": ["aaykra::IncreaseUiFontSize", { "persist": false }],
+      "ctrl-+": ["aaykra::IncreaseUiFontSize", { "persist": false }],
+      "ctrl--": ["aaykra::DecreaseUiFontSize", { "persist": false }],
+      "ctrl-0": ["aaykra::ResetUiFontSize", { "persist": false }],
       "ctrl-1": ["welcome::OpenRecentProject", 0],
       "ctrl-2": ["welcome::OpenRecentProject", 1],
       "ctrl-3": ["welcome::OpenRecentProject", 2],
@@ -1102,7 +1102,7 @@
     "context": "!SettingsWindow",
     "use_key_equivalents": true,
     "bindings": {
-      "ctrl-,": "aayushicode::OpenSettings",
+      "ctrl-,": "aaykra::OpenSettings",
     },
   },
   {
@@ -1200,7 +1200,7 @@
     "bindings": {
       "ctrl-shift-backspace": "worktree_picker::DeleteWorktree",
       "ctrl-alt-shift-backspace": "worktree_picker::ForceDeleteWorktree",
-      "ctrl-shift-,": "aayushicode::OpenWorktreeSetupTasks",
+      "ctrl-shift-,": "aaykra::OpenWorktreeSetupTasks",
     },
   },
   {

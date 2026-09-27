@@ -15,7 +15,7 @@ use workspace::{
         simple_message_notification::MessageNotification,
     },
 };
-use aayushicode_actions::ShowUpdateNotification;
+use aaykra_actions::ShowUpdateNotification;
 
 actions!(
     auto_update,

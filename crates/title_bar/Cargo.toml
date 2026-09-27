@@ -53,7 +53,7 @@ theme.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-aayushicode_actions.workspace = true
+aaykra_actions.workspace = true
 arrayvec = "0.7.6"
 
 [dev-dependencies]

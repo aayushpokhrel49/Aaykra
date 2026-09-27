@@ -320,7 +320,7 @@ pub fn get_shell_safe_zed_path(shell_kind: shell::ShellKind) -> anyhow::Result<S
 
     zed_path
         .try_shell_safe(shell_kind)
-        .context("Failed to shell-escape Aayushi Code executable path.")
+        .context("Failed to shell-escape Aaykra executable path.")
 }
 
 /// Returns a path for the zed cli executable, this function
@@ -379,9 +379,9 @@ pub async fn load_login_shell_environment() -> Result<()> {
         .await
         .with_context(|| format!("capturing environment with {:?}", get_system_shell()))?
     {
-        // Skip SHLVL to prevent it from polluting Aayushi Code's process environment.
+        // Skip SHLVL to prevent it from polluting Aaykra's process environment.
         // The login shell used for env capture increments SHLVL, and if we propagate it,
-        // terminals spawned by Aayushi Code will inherit it and increment again, causing SHLVL
+        // terminals spawned by Aaykra will inherit it and increment again, causing SHLVL
         // to start at 2 instead of 1 (and increase by 2 on each reload).
         if name == "SHLVL" {
             continue;

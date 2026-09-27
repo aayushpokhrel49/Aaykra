@@ -1067,7 +1067,7 @@ mod tests {
     #[test]
     fn test_metadata_blocks_store_table_rows() {
         let parsed = parse_markdown_with_options(
-            "---\ntitle: Post\nauthor: Aayushi Code\n---\nBody",
+            "---\ntitle: Post\nauthor: Aaykra\n---\nBody",
             false,
             false,
             true,
@@ -1113,7 +1113,7 @@ mod tests {
 
     #[test]
     fn test_metadata_table_rows_parse_simple_colon_pairs() {
-        let source = "title: Post\nauthor: Aayushi Code\n";
+        let source = "title: Post\nauthor: Aaykra\n";
         let Some(rows) = parse_metadata_table_rows(source, 0..source.len()) else {
             panic!("expected metadata rows");
         };
@@ -1122,7 +1122,7 @@ mod tests {
             .map(|row| (&source[row.key], &source[row.value]))
             .collect::<Vec<_>>();
 
-        assert_eq!(pairs, vec![("title", "Post"), ("author", "Aayushi Code")]);
+        assert_eq!(pairs, vec![("title", "Post"), ("author", "Aaykra")]);
     }
 
     #[test]

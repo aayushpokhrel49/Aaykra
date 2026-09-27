@@ -31,7 +31,15 @@ use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
-const URL_PREFIX: [&'static str; 5] = ["aayushicode://", "http://", "https://", "file://", "ssh://"];
+const URL_PREFIX: [&'static str; 6] = [
+    "aaykra://",
+    // Pre-rename scheme, still accepted so older links and scripts keep working.
+    "aayushicode://",
+    "http://",
+    "https://",
+    "file://",
+    "ssh://",
+];
 
 struct Detect;
 
@@ -87,11 +95,11 @@ struct Args {
     classic: bool,
     /// Sets a custom directory for all user data (e.g., database, extensions, logs).
     /// This overrides the default platform-specific data directory location:
-    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Aayushi Code`.")]
-    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Aayushi Code`.")]
+    #[cfg_attr(target_os = "macos", doc = "`~/Library/Application Support/Aaykra`.")]
+    #[cfg_attr(target_os = "windows", doc = "`%LOCALAPPDATA%\\Aaykra`.")]
     #[cfg_attr(
         not(any(target_os = "windows", target_os = "macos")),
-        doc = "`$XDG_DATA_HOME/aayushicode`."
+        doc = "`$XDG_DATA_HOME/aaykra`."
     )]
     #[arg(long, value_name = "DIR", value_hint = clap::ValueHint::DirPath)]
     user_data_dir: Option<String>,
@@ -576,8 +584,8 @@ fn run() -> Result<()> {
     }
 
     let (server, server_name) =
-        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Aayushi Code spawn")?;
-    let url = format!("aayushicode-cli://{server_name}");
+        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Aaykra spawn")?;
+    let url = format!("aaykra-cli://{server_name}");
 
     let open_behavior = if args.new {
         cli::OpenBehavior::AlwaysNew
@@ -703,7 +711,7 @@ fn run() -> Result<()> {
             let exit_status = exit_status.clone();
             let user_data_dir_for_thread = user_data_dir.clone();
             move || {
-                let (_, handshake) = server.accept().context("Handshake after Aayushi Code spawn")?;
+                let (_, handshake) = server.accept().context("Handshake after Aaykra spawn")?;
                 let (tx, rx) = (handshake.requests, handshake.responses);
 
                 #[cfg(target_os = "windows")]
@@ -940,7 +948,7 @@ mod linux {
                 .unwrap_or_else(|| paths::data_dir().clone());
 
             let sock_path = data_dir.join(format!(
-                "aayushicode-{}.sock",
+                "aaykra-{}.sock",
                 *release_channel::RELEASE_CHANNEL_NAME
             ));
             let sock = UnixDatagram::unbound()?;
@@ -1084,7 +1092,7 @@ mod flatpak {
 
     pub fn set_bin_if_no_escape(mut args: super::Args) -> super::Args {
         if env::var(NO_ESCAPE_ENV_NAME).is_ok()
-            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("me.aayush.Aayushi-Code"))
+            && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("me.aayush.Aaykra"))
             && args.zed.is_none()
         {
             args.zed = Some("/app/libexec/aaykra-editor".into());
@@ -1099,7 +1107,7 @@ mod flatpak {
         }
 
         if let Ok(flatpak_id) = env::var("FLATPAK_ID") {
-            if !flatpak_id.starts_with("me.aayush.Aayushi-Code") {
+            if !flatpak_id.starts_with("me.aayush.Aaykra") {
                 return None;
             }
 

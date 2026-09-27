@@ -73,7 +73,7 @@ fn developer_page() -> SettingsPage {
     items.push(SettingsPageItem::SectionHeader("Instrumentation"));
     items.push(SettingsPageItem::SettingItem(SettingItem {
         title: "Performance Profiler",
-        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `aayushicode: open performance profiler`. May lead to increased memory usage.",
+        description: "Collect timing data for foreground and background executor tasks so they can be inspected via `aaykra: open performance profiler`. May lead to increased memory usage.",
         field: Box::new(SettingField {
             json_path: Some("instrumentation.performance_profiler.enabled"),
             pick: |settings_content| {
@@ -1305,7 +1305,7 @@ fn keymap_page() -> SettingsPage {
                     original_window
                         .update(cx, |_workspace, original_window, cx| {
                             original_window
-                                .dispatch_action(aayushicode_actions::OpenKeymap.boxed_clone(), cx);
+                                .dispatch_action(aaykra_actions::OpenKeymap.boxed_clone(), cx);
                             original_window.activate_window();
                         })
                         .ok();

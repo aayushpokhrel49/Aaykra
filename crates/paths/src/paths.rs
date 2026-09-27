@@ -1,4 +1,4 @@
-//! Paths to locations used by Aayushi Code.
+//! Paths to locations used by Aaykra.
 
 use anyhow::Context as _;
 use std::env;
@@ -16,7 +16,7 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 /// and state directory paths.
 ///
 /// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Aayushi Code";
+pub const APP_NAME: &str = "Aaykra";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.
@@ -47,6 +47,28 @@ pub const APP_NAME_LOWERCASE: &str = {
     }
 };
 
+/// The application name used before the rename to Aaykra, kept so an
+/// existing install's settings, extensions, databases, and history are still
+/// found. New directories are never created under this name.
+pub const LEGACY_APP_NAME: &str = "Aayushi Code";
+
+/// Lowercased form of [`LEGACY_APP_NAME`], for XDG-style paths.
+pub const LEGACY_APP_NAME_LOWERCASE: &str = "aayushi code";
+
+/// Resolves an app-owned root directory, preferring the current Aaykra name
+/// and falling back to the pre-rename one.
+///
+/// Nothing is moved on disk: an install that predates the rename keeps using
+/// its existing directory so state isn't split across two locations. Deleting
+/// the legacy directory is what opts an install into a fresh `Aaykra` one.
+fn resolve_app_root(current: PathBuf, legacy: PathBuf) -> PathBuf {
+    if current.exists() || !legacy.exists() {
+        current
+    } else {
+        legacy
+    }
+}
+
 /// A custom data directory override, set only by `set_custom_data_dir`.
 /// This is used to override the default data directory location.
 /// The directory will be created if it doesn't exist when set.
@@ -54,16 +76,16 @@ static CUSTOM_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved data directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/Library/Application Support/Aayushi Code`.
-/// On Linux/FreeBSD, this is `$XDG_DATA_HOME/aayushi code`.
-/// On Windows, this is `%LOCALAPPDATA%\Aayushi Code`.
+/// On macOS, this is `~/Library/Application Support/Aaykra`.
+/// On Linux/FreeBSD, this is `$XDG_DATA_HOME/aaykra`.
+/// On Windows, this is `%LOCALAPPDATA%\Aaykra`.
 static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// The resolved config directory, combining custom override or platform defaults.
 /// This is set once and cached for subsequent calls.
-/// On macOS, this is `~/.config/aayushi code`.
-/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/aayushi code`.
-/// On Windows, this is `%APPDATA%\Aayushi Code`.
+/// On macOS, this is `~/.config/aaykra`.
+/// On Linux/FreeBSD, this is `$XDG_CONFIG_HOME/aaykra`.
+/// On Windows, this is `%APPDATA%\Aaykra`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Returns the relative path to the `.aaykra_server` directory on the ssh host.
@@ -145,103 +167,116 @@ pub fn custom_data_dir_instance_hash() -> Option<u64> {
     Some(hash)
 }
 
-/// Returns the path to the configuration directory used by Aayushi Code.
+/// Returns the path to the configuration directory used by Aaykra.
 pub fn config_dir() -> &'static PathBuf {
     CONFIG_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
-            custom_dir.join("config")
-        } else if cfg!(target_os = "windows") {
-            dirs::config_dir()
-                .expect("failed to determine RoamingAppData directory")
-                .join(APP_NAME)
-        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            if let Ok(flatpak_xdg_config) = std::env::var("FLATPAK_XDG_CONFIG_HOME") {
-                flatpak_xdg_config.into()
-            } else {
-                dirs::config_dir().expect("failed to determine XDG_CONFIG_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE)
-        } else {
-            home_dir().join(".config").join(APP_NAME_LOWERCASE)
+            return custom_dir.join("config");
         }
+        let (current, legacy) = if cfg!(target_os = "windows") {
+            let base = dirs::config_dir().expect("failed to determine RoamingAppData directory");
+            (base.join(APP_NAME), base.join(LEGACY_APP_NAME))
+        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            let base = match std::env::var("FLATPAK_XDG_CONFIG_HOME") {
+                Ok(flatpak_xdg_config) => flatpak_xdg_config.into(),
+                Err(_) => {
+                    dirs::config_dir().expect("failed to determine XDG_CONFIG_HOME directory")
+                }
+            };
+            (
+                base.join(APP_NAME_LOWERCASE),
+                base.join(LEGACY_APP_NAME_LOWERCASE),
+            )
+        } else {
+            let base = home_dir().join(".config");
+            (
+                base.join(APP_NAME_LOWERCASE),
+                base.join(LEGACY_APP_NAME_LOWERCASE),
+            )
+        };
+        resolve_app_root(current, legacy)
     })
 }
 
-/// Returns the path to the data directory used by Aayushi Code.
+/// Returns the path to the data directory used by Aaykra.
 pub fn data_dir() -> &'static PathBuf {
     CURRENT_DATA_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
-            custom_dir.clone()
-        } else if cfg!(target_os = "macos") {
-            home_dir()
-                .join("Library/Application Support")
-                .join(APP_NAME)
-        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            if let Ok(flatpak_xdg_data) = std::env::var("FLATPAK_XDG_DATA_HOME") {
-                flatpak_xdg_data.into()
-            } else {
-                dirs::data_local_dir().expect("failed to determine XDG_DATA_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE)
-        } else if cfg!(target_os = "windows") {
-            dirs::data_local_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME)
-        } else {
-            config_dir().clone() // Fallback
+            return custom_dir.clone();
         }
+        let (current, legacy) = if cfg!(target_os = "macos") {
+            let base = home_dir().join("Library/Application Support");
+            (base.join(APP_NAME), base.join(LEGACY_APP_NAME))
+        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            let base = match std::env::var("FLATPAK_XDG_DATA_HOME") {
+                Ok(flatpak_xdg_data) => flatpak_xdg_data.into(),
+                Err(_) => dirs::data_local_dir().expect("failed to determine XDG_DATA_HOME directory"),
+            };
+            (
+                base.join(APP_NAME_LOWERCASE),
+                base.join(LEGACY_APP_NAME_LOWERCASE),
+            )
+        } else if cfg!(target_os = "windows") {
+            let base = dirs::data_local_dir().expect("failed to determine LocalAppData directory");
+            (base.join(APP_NAME), base.join(LEGACY_APP_NAME))
+        } else {
+            return config_dir().clone(); // Fallback
+        };
+        resolve_app_root(current, legacy)
     })
 }
 
 pub fn state_dir() -> &'static PathBuf {
     static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
     STATE_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            return home_dir().join(".local").join("state").join(APP_NAME);
-        }
-
-        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            return if let Ok(flatpak_xdg_state) = std::env::var("FLATPAK_XDG_STATE_HOME") {
-                flatpak_xdg_state.into()
-            } else {
-                dirs::state_dir().expect("failed to determine XDG_STATE_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE);
+        let (current, legacy) = if cfg!(target_os = "macos") {
+            let base = home_dir().join(".local").join("state");
+            (base.join(APP_NAME), base.join(LEGACY_APP_NAME))
+        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            let base = match std::env::var("FLATPAK_XDG_STATE_HOME") {
+                Ok(flatpak_xdg_state) => flatpak_xdg_state.into(),
+                Err(_) => dirs::state_dir().expect("failed to determine XDG_STATE_HOME directory"),
+            };
+            (
+                base.join(APP_NAME_LOWERCASE),
+                base.join(LEGACY_APP_NAME_LOWERCASE),
+            )
         } else {
             // Windows
-            return dirs::data_local_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME);
-        }
+            let base = dirs::data_local_dir().expect("failed to determine LocalAppData directory");
+            (base.join(APP_NAME), base.join(LEGACY_APP_NAME))
+        };
+        resolve_app_root(current, legacy)
     })
 }
 
-/// Returns the path to the temp directory used by Aayushi Code.
+/// Returns the path to the temp directory used by Aaykra.
 pub fn temp_dir() -> &'static PathBuf {
     static TEMP_DIR: OnceLock<PathBuf> = OnceLock::new();
     TEMP_DIR.get_or_init(|| {
-        if cfg!(target_os = "macos") {
-            return dirs::cache_dir()
-                .expect("failed to determine cachesDirectory directory")
-                .join(APP_NAME);
-        }
-
-        if cfg!(target_os = "windows") {
-            return dirs::cache_dir()
-                .expect("failed to determine LocalAppData directory")
-                .join(APP_NAME);
-        }
-
-        if cfg!(any(target_os = "linux", target_os = "freebsd")) {
-            return if let Ok(flatpak_xdg_cache) = std::env::var("FLATPAK_XDG_CACHE_HOME") {
-                flatpak_xdg_cache.into()
-            } else {
-                dirs::cache_dir().expect("failed to determine XDG_CACHE_HOME directory")
-            }
-            .join(APP_NAME_LOWERCASE);
-        }
-
-        home_dir().join(".cache").join(APP_NAME_LOWERCASE)
+        let (current, legacy) = if cfg!(target_os = "macos") {
+            let base = dirs::cache_dir().expect("failed to determine cachesDirectory directory");
+            (base.join(APP_NAME), base.join(LEGACY_APP_NAME))
+        } else if cfg!(target_os = "windows") {
+            let base = dirs::cache_dir().expect("failed to determine LocalAppData directory");
+            (base.join(APP_NAME), base.join(LEGACY_APP_NAME))
+        } else if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            let base = match std::env::var("FLATPAK_XDG_CACHE_HOME") {
+                Ok(flatpak_xdg_cache) => flatpak_xdg_cache.into(),
+                Err(_) => dirs::cache_dir().expect("failed to determine XDG_CACHE_HOME directory"),
+            };
+            (
+                base.join(APP_NAME_LOWERCASE),
+                base.join(LEGACY_APP_NAME_LOWERCASE),
+            )
+        } else {
+            let base = home_dir().join(".cache");
+            (
+                base.join(APP_NAME_LOWERCASE),
+                base.join(LEGACY_APP_NAME_LOWERCASE),
+            )
+        };
+        resolve_app_root(current, legacy)
     })
 }
 
@@ -250,26 +285,27 @@ pub fn logs_dir() -> &'static PathBuf {
     static LOGS_DIR: OnceLock<PathBuf> = OnceLock::new();
     LOGS_DIR.get_or_init(|| {
         if cfg!(target_os = "macos") {
-            home_dir().join("Library/Logs").join(APP_NAME)
+            let base = home_dir().join("Library/Logs");
+            resolve_app_root(base.join(APP_NAME), base.join(LEGACY_APP_NAME))
         } else {
             data_dir().join("logs")
         }
     })
 }
 
-/// Returns the path to the Aayushi Code server directory on this SSH host.
+/// Returns the path to the Aaykra server directory on this SSH host.
 pub fn remote_server_state_dir() -> &'static PathBuf {
     static REMOTE_SERVER_STATE: OnceLock<PathBuf> = OnceLock::new();
     REMOTE_SERVER_STATE.get_or_init(|| data_dir().join("server_state"))
 }
 
-/// Returns the path to the `Aayushi Code.log` file.
+/// Returns the path to the `Aaykra.log` file.
 pub fn log_file() -> &'static PathBuf {
     static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
     LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log", APP_NAME)))
 }
 
-/// Returns the path to the `Aayushi Code.log.old` file.
+/// Returns the path to the `Aaykra.log.old` file.
 pub fn old_log_file() -> &'static PathBuf {
     static OLD_LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
     OLD_LOG_FILE.get_or_init(|| logs_dir().join(format!("{}.log.old", APP_NAME)))
@@ -340,7 +376,7 @@ pub fn debug_scenarios_file() -> &'static PathBuf {
 /// Returns the path to the user-global `AGENTS.md` file.
 ///
 /// This file holds personal agent instructions that apply to every project the
-/// user opens, and is loaded into the native Aayushi Code agent's system prompt.
+/// user opens, and is loaded into the native Aaykra agent's system prompt.
 pub fn agents_file() -> &'static PathBuf {
     static AGENTS_FILE: OnceLock<PathBuf> = OnceLock::new();
     AGENTS_FILE.get_or_init(|| config_dir().join("AGENTS.md"))
@@ -458,7 +494,7 @@ pub fn embeddings_dir() -> &'static PathBuf {
 
 /// Returns the path to the languages directory.
 ///
-/// This is where language servers are downloaded to for languages built-in to Aayushi Code.
+/// This is where language servers are downloaded to for languages built-in to Aaykra.
 pub fn languages_dir() -> &'static PathBuf {
     static LANGUAGES_DIR: OnceLock<PathBuf> = OnceLock::new();
     LANGUAGES_DIR.get_or_init(|| data_dir().join("languages"))
@@ -466,7 +502,7 @@ pub fn languages_dir() -> &'static PathBuf {
 
 /// Returns the path to the debug adapters directory
 ///
-/// This is where debug adapters are downloaded to for DAPs that are built-in to Aayushi Code.
+/// This is where debug adapters are downloaded to for DAPs that are built-in to Aaykra.
 pub fn debug_adapters_dir() -> &'static PathBuf {
     static DEBUG_ADAPTERS_DIR: OnceLock<PathBuf> = OnceLock::new();
     DEBUG_ADAPTERS_DIR.get_or_init(|| data_dir().join("debug_adapters"))

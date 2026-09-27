@@ -35,7 +35,7 @@ theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-aayushicode_actions.workspace = true
+aaykra_actions.workspace = true
 
 [dev-dependencies]
 

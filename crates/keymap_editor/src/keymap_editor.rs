@@ -44,7 +44,7 @@ use workspace::{
 };
 
 pub use ui_components::*;
-use aayushicode_actions::{ChangeKeybinding, OpenKeymap};
+use aaykra_actions::{ChangeKeybinding, OpenKeymap};
 
 use crate::{
     action_completion_provider::ActionCompletionProvider,
@@ -2007,12 +2007,12 @@ impl Render for KeymapEditor {
                                     .child(
                                         Button::new("edit-in-json", "Edit in JSON")
                                             .key_binding(
-                                                ui::KeyBinding::for_action_in(&aayushicode_actions::OpenKeymapFile, &focus_handle, cx)
+                                                ui::KeyBinding::for_action_in(&aaykra_actions::OpenKeymapFile, &focus_handle, cx)
                                                     .map(|kb| kb.size(rems_from_px(10_f32))),
                                             )
                                             .on_click(|_, window, cx| {
                                                 window.dispatch_action(
-                                                    aayushicode_actions::OpenKeymapFile.boxed_clone(),
+                                                    aaykra_actions::OpenKeymapFile.boxed_clone(),
                                                     cx,
                                                 );
                                             })
@@ -4017,12 +4017,12 @@ mod tests {
         let keymap_content = r#"[
     {
         "bindings": {
-            "alt-cmd-shift-c": "aayushicode::OpenKeymap"
+            "alt-cmd-shift-c": "aaykra::OpenKeymap"
         }
     },
     {
         "bindings": {
-            "alt-cmd-shift-c": "aayushicode::OpenKeymap"
+            "alt-cmd-shift-c": "aaykra::OpenKeymap"
         }
     }
 ]"#;
@@ -4030,7 +4030,7 @@ mod tests {
         let cx = &mut cx;
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "aayushicode::OpenKeymap")
+            visible_rows_for_action(editor, "aaykra::OpenKeymap")
         });
         assert_eq!(
             rows.len(),
@@ -4056,7 +4056,7 @@ mod tests {
         cx.run_until_parked();
 
         let rows = keymap_editor.read_with(cx, |editor, _| {
-            visible_rows_for_action(editor, "aayushicode::OpenKeymap")
+            visible_rows_for_action(editor, "aaykra::OpenKeymap")
         });
         assert_eq!(rows.len(), 1, "expected one row remaining after deletion");
     }
@@ -4284,7 +4284,7 @@ mod tests {
 
     #[test]
     fn binding_is_unbound_by_unbind_respects_precedence() {
-        let binding = gpui::KeyBinding::new("tab", aayushicode_actions::OpenKeymap, None);
+        let binding = gpui::KeyBinding::new("tab", aaykra_actions::OpenKeymap, None);
         let unbind =
             gpui::KeyBinding::new("tab", gpui::Unbind(binding.action().name().into()), None);
 

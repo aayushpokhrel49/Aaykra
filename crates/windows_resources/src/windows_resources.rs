@@ -19,12 +19,12 @@ fn git_sha() -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// The release channel, sourced from the checked-in `crates/aayushicode/RELEASE_CHANNEL`
+/// The release channel, sourced from the checked-in `crates/aaykra/RELEASE_CHANNEL`
 /// file (what the packaging workflows write and what the app's
 /// `release_channel` crate reads). The `RELEASE_CHANNEL` environment variable
 /// is only used as a fallback when the file is missing.
 fn release_channel() -> String {
-    std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../aayushicode/RELEASE_CHANNEL"))
+    std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../aaykra/RELEASE_CHANNEL"))
         .map(|channel| channel.trim().to_string())
         .ok()
         .filter(|channel| !channel.is_empty())
@@ -51,7 +51,7 @@ fn product_version() -> String {
     format!("{pkg_version}+{metadata}")
 }
 
-const ICON_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../aayushicode/resources/windows");
+const ICON_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../aaykra/resources/windows");
 const MANIFEST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources/manifest.xml");
 
 pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {

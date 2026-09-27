@@ -11,7 +11,7 @@ use gpui::{Context, DismissEvent, Entity, Focusable as _, Pixels, Point, Subscri
 use std::ops::Range;
 use text::PointUtf16;
 use workspace::OpenInTerminal;
-use aayushicode_actions::preview::{
+use aaykra_actions::preview::{
     markdown::OpenPreview as OpenMarkdownPreview, svg::OpenPreview as OpenSvgPreview,
 };
 
@@ -266,11 +266,11 @@ pub fn deploy_context_menu(
                 )
                 .action(
                     "Show Incoming Calls",
-                    Box::new(aayushicode_actions::ShowIncomingCalls),
+                    Box::new(aaykra_actions::ShowIncomingCalls),
                 )
                 .action(
                     "Show Outgoing Calls",
-                    Box::new(aayushicode_actions::ShowOutgoingCalls),
+                    Box::new(aaykra_actions::ShowOutgoingCalls),
                 )
                 .separator()
                 .action("Rename Symbol", Box::new(Rename))

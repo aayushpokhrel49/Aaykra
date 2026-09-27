@@ -45,7 +45,7 @@ use workspace::{
     MAX_RECENT_SELECTIONS, ModalView, OpenOptions, OpenVisible, SplitDirection, Workspace,
     item::PreviewTabsSettings, notifications::NotifyResultExt, pane,
 };
-use aayushicode_actions::search::ToggleIncludeIgnored;
+use aaykra_actions::search::ToggleIncludeIgnored;
 
 actions!(
     file_finder,

@@ -3,11 +3,11 @@
 version = 4
 
 [[package]]
-name = "aayushicode"
-version = "1.0.60"
+name = "aaykra"
+version = "1.0.70"
 dependencies = [
- "aayushicode_actions",
- "aayushicode_env_vars",
+ "aaykra_actions",
+ "aaykra_env_vars",
  "activity_indicator",
  "anyhow",
  "ashpd",
@@ -140,7 +140,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aayushicode_actions"
+name = "aaykra_actions"
 version = "0.1.0"
 dependencies = [
  "gpui",
@@ -150,7 +150,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aayushicode_env_vars"
+name = "aaykra_env_vars"
 version = "0.1.0"
 dependencies = [
  "env_var",
@@ -952,7 +952,7 @@ dependencies = [
 name = "auto_update_ui"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "auto_update",
  "client",
@@ -1079,7 +1079,7 @@ checksum = "3a8241f3ebb85c056b509d4327ad0358fbbba6ffb340bf388f26350aeda225b1"
 name = "benchmarks"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "assets",
  "criterion",
  "editor",
@@ -1380,7 +1380,7 @@ dependencies = [
 name = "call_hierarchy"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "editor",
  "futures",
  "fuzzy",
@@ -1915,7 +1915,7 @@ dependencies = [
 name = "command_palette"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "client",
  "command_palette_hooks",
@@ -2616,7 +2616,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 name = "db"
 version = "0.1.0"
 dependencies = [
- "aayushicode_env_vars",
+ "aaykra_env_vars",
  "anyhow",
  "futures",
  "gpui",
@@ -2668,7 +2668,7 @@ dependencies = [
 name = "debugger_ui"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "bitflags 2.13.1",
  "collections",
@@ -2781,7 +2781,7 @@ dependencies = [
 name = "diagnostics"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "collections",
  "ctor",
@@ -2980,7 +2980,7 @@ checksum = "3b31a881d38439026e3d5dd938ab20328d36e23caca8fd5981c42e4b677f5842"
 name = "editor"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "aho-corasick",
  "anyhow",
  "assets",
@@ -3517,7 +3517,7 @@ dependencies = [
 name = "extensions_ui"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "cloud_api_types",
  "collections",
@@ -3622,7 +3622,7 @@ checksum = "b97b65636e5b9ef369943878ac74335ba1c55c1cb6adbf1e2c293c624248d693"
 name = "file_finder"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "client",
  "collections",
@@ -4230,7 +4230,7 @@ dependencies = [
 name = "git_ui"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "askpass",
  "async-channel 2.5.0",
@@ -4294,7 +4294,7 @@ dependencies = [
 name = "git_ui_core"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "askpass",
  "buffer_diff",
@@ -5423,7 +5423,7 @@ dependencies = [
 name = "inspector_ui"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "command_palette_hooks",
  "editor",
@@ -5769,7 +5769,7 @@ dependencies = [
 name = "keymap_editor"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "collections",
  "command_palette",
@@ -6014,7 +6014,7 @@ dependencies = [
 name = "language_tools"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "client",
  "collections",
@@ -6586,7 +6586,7 @@ dependencies = [
 name = "markdown_preview"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "buffer_diff",
  "db",
@@ -7001,7 +7001,7 @@ checksum = "0676bb32a98c1a483ce53e500a81ad9c3d5b3f7c920c28c24e9cb0980d0b5bc8"
 name = "notifications"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "client",
  "component",
@@ -7497,7 +7497,7 @@ dependencies = [
 name = "onboarding"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "client",
  "collections",
@@ -7663,7 +7663,7 @@ dependencies = [
 name = "outline"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "editor",
  "futures",
  "fuzzy_nucleo",
@@ -7688,7 +7688,7 @@ dependencies = [
 name = "outline_panel"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "async-channel 2.5.0",
  "collections",
@@ -8383,7 +8383,7 @@ dependencies = [
 name = "picker"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "db",
  "editor",
@@ -8499,7 +8499,7 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 name = "platform_title_bar"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "gpui",
  "project",
  "settings",
@@ -8884,7 +8884,7 @@ dependencies = [
 name = "project_panel"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "client",
  "collections",
@@ -9470,7 +9470,7 @@ dependencies = [
 name = "recent_projects"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "askpass",
  "chrono",
@@ -10214,7 +10214,7 @@ checksum = "1c107b6f4780854c8b126e228ea8869f4d7b71260f962fefb57b996b8959ba6b"
 name = "search"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "any_vec",
  "anyhow",
  "bitflags 2.13.1",
@@ -10520,7 +10520,7 @@ dependencies = [
 name = "settings_profile_selector"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "editor",
  "fuzzy",
  "gpui",
@@ -10539,7 +10539,7 @@ dependencies = [
 name = "settings_ui"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "component",
  "editor",
@@ -11153,7 +11153,7 @@ checksum = "0193cc4331cfd2f3d2011ef287590868599a2f33c3e69bc22c1a3d3acf9e02fb"
 name = "svg_preview"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "file_icons",
  "gpui",
  "language",
@@ -11369,7 +11369,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 name = "task"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "collections",
  "futures",
@@ -11392,7 +11392,7 @@ dependencies = [
 name = "tasks_ui"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "collections",
  "editor",
@@ -11506,7 +11506,7 @@ dependencies = [
 name = "terminal_view"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "async-recursion",
  "breadcrumbs",
@@ -11622,7 +11622,7 @@ dependencies = [
 name = "theme_selector"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "editor",
  "fs",
  "fuzzy",
@@ -11840,7 +11840,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 name = "title_bar"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "anyhow",
  "arrayvec",
  "auto_update",
@@ -14866,7 +14866,7 @@ dependencies = [
 name = "workspace"
 version = "0.1.0"
 dependencies = [
- "aayushicode_actions",
+ "aaykra_actions",
  "any_vec",
  "anyhow",
  "async-recursion",

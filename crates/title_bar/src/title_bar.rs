@@ -40,7 +40,7 @@ use update_version::UpdateVersion;
 use util::ResultExt;
 use workspace::{AccessibleMode, MultiWorkspace, ToggleWorktreeSecurity, Workspace};
 
-use aayushicode_actions::OpenRemote;
+use aaykra_actions::OpenRemote;
 
 pub use onboarding_banner::restore_banner;
 
@@ -677,7 +677,7 @@ impl TitleBar {
                     .selected_style(ButtonStyle::Tinted(TintColor::Accent))
                     .when(!is_project_selected, |s| s.color(Color::Muted)),
                 move |_window, cx| {
-                    Tooltip::for_action("Recent Projects", &aayushicode_actions::OpenRecent::default(), cx)
+                    Tooltip::for_action("Recent Projects", &aaykra_actions::OpenRecent::default(), cx)
                 },
             )
             .anchor(gpui::Anchor::TopLeft)
@@ -781,7 +781,7 @@ impl TitleBar {
                     move |_window, cx| {
                         Tooltip::with_meta(
                             "Worktree",
-                            Some(&aayushicode_actions::git::Worktree),
+                            Some(&aaykra_actions::git::Worktree),
                             format!("Currently In Use: {}", worktree_label),
                             cx,
                         )
@@ -839,7 +839,7 @@ impl TitleBar {
                         };
                         Tooltip::with_meta(
                             "Branch & Stash",
-                            Some(&aayushicode_actions::git::Branch),
+                            Some(&aaykra_actions::git::Branch),
                             meta,
                             cx,
                         )

@@ -45,7 +45,7 @@ target_dir="${CARGO_TARGET_DIR:-target}"
 # ALLOW_MISSING_LICENSES lets it succeed even if cargo-about is unavailable.
 ALLOW_MISSING_LICENSES=1 script/generate-licenses || true
 
-version="$(script/get-crate-version aayushicode)"
+version="$(script/get-crate-version aaykra)"
 export RELEASE_VERSION="${version}"
 
 commit=$(git rev-parse HEAD | cut -c 1-7)
@@ -62,7 +62,7 @@ export CC="${CC:-$(command -v clang)}"
 # Build binary in release mode. Keep the crate's own binary names (`aaykra`, `cli`)
 # here; they are renamed at packaging time (see the flatpak/snap manifests for
 # the same convention).
-cargo build --release --package aayushicode --package cli
+cargo build --release --package aaykra --package cli
 
 # Strip debug symbols to keep the package small.
 llvm-objcopy --strip-debug "${target_dir}/release/aaykra"
@@ -81,7 +81,7 @@ find_libs() {
 }
 
 # Assemble the file layout for the package in a staging directory.
-channel=$(<crates/aayushicode/RELEASE_CHANNEL)
+channel=$(<crates/aaykra/RELEASE_CHANNEL)
 suffix=""
 if [ "$channel" != "stable" ]; then
   suffix="-$channel"
@@ -106,21 +106,21 @@ cp $(find_libs) "${install_dir}/lib"
 # App identity: the app ID doubles as the Wayland window ID, so an icon file
 # named after it must be installed for compositors to show a window/taskbar icon.
 APP_NAME="AAYKRA"
-APP_ID="me.aayush.Aayushi-Code"
+APP_ID="me.aayush.Aaykra"
 if [ "$channel" == "dev" ]; then
   APP_NAME="AAYKRA Dev"
-  APP_ID="me.aayush.Aayushi-Code-Dev"
+  APP_ID="me.aayush.Aaykra-Dev"
 fi
 
 # Icons. The generic `aaykra` name covers the desktop entry's
 # `Icon=aaykra`; the app-id-named copy lets Wayland compositors resolve
 # the window/taskbar icon (they look the icon up by the window's app_id).
 mkdir -p "${package_root}/usr/share/icons/hicolor/512x512/apps"
-cp "crates/aayushicode/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/aaykra.png"
-cp "crates/aayushicode/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/${APP_ID}.png"
+cp "crates/aaykra/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/aaykra.png"
+cp "crates/aaykra/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/${APP_ID}.png"
 mkdir -p "${package_root}/usr/share/icons/hicolor/1024x1024/apps"
-cp "crates/aayushicode/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/aaykra.png"
-cp "crates/aayushicode/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/${APP_ID}.png"
+cp "crates/aaykra/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/aaykra.png"
+cp "crates/aaykra/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/${APP_ID}.png"
 
 # .desktop
 export DO_STARTUP_NOTIFY="true"
@@ -131,7 +131,7 @@ export APP_NAME="${APP_NAME}"
 export APP_ID="${APP_ID}"
 
 mkdir -p "${package_root}/usr/share/applications"
-envsubst < "crates/aayushicode/resources/zed.desktop.in" > "${package_root}/usr/share/applications/${APP_ID}.desktop"
+envsubst < "crates/aaykra/resources/zed.desktop.in" > "${package_root}/usr/share/applications/${APP_ID}.desktop"
 chmod +x "${package_root}/usr/share/applications/${APP_ID}.desktop"
 
 # Generated licenses (`assets/licenses.md`) are created by generate-licenses.

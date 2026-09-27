@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/aaykra",
+    "crates/aaykra_actions",
+    "crates/aaykra_env_vars",
     "crates/activity_indicator",
     "crates/askpass",
     "crates/assets",
@@ -159,9 +162,6 @@ members = [
     "crates/workspace",
     "crates/worktree",
     "crates/worktree_benchmarks",
-    "crates/aayushicode",
-    "crates/aayushicode_actions",
-    "crates/aayushicode_env_vars",
     "crates/zlog",
     "crates/zlog_settings",
     "crates/ztracing",
@@ -183,13 +183,15 @@ members = [
     "tooling/perf",
     "tooling/xtask",
 ]
-default-members = ["crates/aayushicode"]
+default-members = ["crates/aaykra"]
 
 [workspace.package]
 publish = false
 edition = "2024"
 
 [workspace.dependencies]
+aaykra_actions = { path = "crates/aaykra_actions" }
+aaykra_env_vars = { path = "crates/aaykra_env_vars" }
 
 #
 # Workspace member crates
@@ -343,8 +345,6 @@ util_macros = { path = "crates/util_macros" }
 watch = { path = "crates/watch" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
-aayushicode_actions = { path = "crates/aayushicode_actions" }
-aayushicode_env_vars = { path = "crates/aayushicode_env_vars" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }
 ztracing = { path = "crates/ztracing" }
@@ -850,6 +850,7 @@ wasmtime-environ = { opt-level = 3 }
 wasmtime-internal-cranelift = { opt-level = 3 }
 serde_json = { opt-level = 3 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
+aaykra_actions = { codegen-units = 1 }
 activity_indicator = { codegen-units = 1 }
 assets = { codegen-units = 1 }
 breadcrumbs = { codegen-units = 1 }
@@ -875,7 +876,6 @@ snippets_ui = { codegen-units = 1 }
 theme_selector = { codegen-units = 1 }
 time_format = { codegen-units = 1 }
 ui_input = { codegen-units = 1 }
-aayushicode_actions = { codegen-units = 1 }
 
 [profile.release]
 opt-level = 3

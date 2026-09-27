@@ -283,11 +283,11 @@ fn github_asset_names(asset: &str, os: &str, arch: &str) -> Result<Vec<String>> 
         _ => anyhow::bail!("no release asset for {asset} on {os}"),
     }];
     match (asset, os) {
-        ("zed", "macos") => names.push(format!("AayushiCode-{arch}.dmg")),
-        ("zed", "linux") => names.push(format!("aayushicode-linux-{arch}.tar.gz")),
-        ("zed", "windows") => names.push(format!("AayushiCode-{arch}.exe")),
+        ("zed", "macos") => names.push(format!("Aaykra-{arch}.dmg")),
+        ("zed", "linux") => names.push(format!("aaykra-linux-{arch}.tar.gz")),
+        ("zed", "windows") => names.push(format!("Aaykra-{arch}.exe")),
         ("aaykra-remote-server", _) => {
-            names.push(format!("aayushicode-remote-server-{os}-{arch}.gz"));
+            names.push(format!("aaykra-remote-server-{os}-{arch}.gz"));
         }
         _ => {}
     }
@@ -1662,22 +1662,22 @@ mod tests {
             github_asset_names("zed", "linux", "x86_64").unwrap(),
             [
                 "aaykra-linux-x86_64.tar.gz",
-                "aayushicode-linux-x86_64.tar.gz",
+                "aaykra-linux-x86_64.tar.gz",
             ]
         );
         assert_eq!(
             github_asset_names("zed", "macos", "aarch64").unwrap(),
-            ["aaykra-aarch64.dmg", "AayushiCode-aarch64.dmg"]
+            ["aaykra-aarch64.dmg", "Aaykra-aarch64.dmg"]
         );
         assert_eq!(
             github_asset_names("zed", "windows", "x86_64").unwrap(),
-            ["aaykra-x86_64.exe", "AayushiCode-x86_64.exe"]
+            ["aaykra-x86_64.exe", "Aaykra-x86_64.exe"]
         );
         assert_eq!(
             github_asset_names("aaykra-remote-server", "linux", "x86_64").unwrap(),
             [
                 "aaykra-remote-server-linux-x86_64.gz",
-                "aayushicode-remote-server-linux-x86_64.gz",
+                "aaykra-remote-server-linux-x86_64.gz",
             ]
         );
     }

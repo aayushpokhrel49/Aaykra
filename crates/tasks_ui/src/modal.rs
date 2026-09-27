@@ -20,7 +20,7 @@ use ui::{
 
 use util::{ResultExt, truncate_and_trailoff};
 use workspace::{ModalView, Workspace};
-pub use aayushicode_actions::{Rerun, Spawn};
+pub use aaykra_actions::{Rerun, Spawn};
 
 /// A modal used to spawn new tasks.
 pub struct TasksModalDelegate {
@@ -759,7 +759,7 @@ mod tests {
         fs.insert_tree(
             path!("/dir"),
             json!({
-                ".aayushicode": {
+                ".aaykra": {
                     "tasks.json": r#"[
                         {
                             "label": "example task",
@@ -932,7 +932,7 @@ mod tests {
         fs.insert_tree(
             path!("/dir"),
             json!({
-                ".aayushicode": {
+                ".aaykra": {
                     "tasks.json": r#"[
                         {
                             "label": "hello from $ZED_FILE:$ZED_ROW:$ZED_COLUMN",

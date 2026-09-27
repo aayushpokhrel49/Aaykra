@@ -689,8 +689,12 @@ impl ProtoClient for Client {
     }
 }
 
-/// prefix for the aayushicode:// url scheme
-pub const ZED_URL_SCHEME: &str = "aayushicode";
+/// prefix for the aaykra:// url scheme
+pub const ZED_URL_SCHEME: &str = "aaykra";
+
+/// The url scheme Aaykra used before the rename. Still registered so links
+/// created against it keep opening the app.
+pub const LEGACY_ZED_URL_SCHEME: &str = "aayushicode";
 
 #[cfg(test)]
 mod tests {

@@ -5,7 +5,7 @@
 You can test your changes to the `cli` crate by first building the main zed binary:
 
 ```
-cargo build -p aayushicode
+cargo build -p aaykra
 ```
 
 And then building and running the `cli` crate with the following parameters:

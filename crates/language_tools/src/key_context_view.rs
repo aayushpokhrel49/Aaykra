@@ -82,7 +82,7 @@ impl KeyContextView {
                         "".to_string()
                     };
                     let mut name = binding.action().name();
-                    if name == "aayushicode::NoAction" {
+                    if name == "aaykra::NoAction" {
                         name = "(null)"
                     }
 
@@ -135,7 +135,7 @@ impl KeyContextView {
         if let Some(last_action) = a {
             last_action.partial_eq(b)
         } else {
-            b.name() == "aayushicode::NoAction"
+            b.name() == "aaykra::NoAction"
         }
     }
 }
@@ -211,19 +211,19 @@ impl Render for KeyContextView {
                         Button::new("view_default_keymap", "View Default Keymap")
                             .style(ButtonStyle::Filled)
                             .key_binding(ui::KeyBinding::for_action(
-                                &aayushicode_actions::OpenDefaultKeymap,
+                                &aaykra_actions::OpenDefaultKeymap,
                                 cx
                             ))
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(aayushicode_actions::OpenDefaultKeymap.boxed_clone(), cx);
+                                window.dispatch_action(aaykra_actions::OpenDefaultKeymap.boxed_clone(), cx);
                             }),
                     )
                     .child(
                         Button::new("edit_your_keymap", "Edit Keymap File")
                             .style(ButtonStyle::Filled)
-                            .key_binding(ui::KeyBinding::for_action(&aayushicode_actions::OpenKeymapFile, cx))
+                            .key_binding(ui::KeyBinding::for_action(&aaykra_actions::OpenKeymapFile, cx))
                             .on_click(|_, window, cx| {
-                                window.dispatch_action(aayushicode_actions::OpenKeymapFile.boxed_clone(), cx);
+                                window.dispatch_action(aaykra_actions::OpenKeymapFile.boxed_clone(), cx);
                             }),
                     ),
             )

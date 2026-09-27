@@ -6639,7 +6639,7 @@ pub fn render_breadcrumb_text(
                                         .justify_between()
                                         .child(Label::new("Show Symbol Outline"))
                                         .child(ui::KeyBinding::for_action_in(
-                                            &aayushicode_actions::outline::ToggleOutline,
+                                            &aaykra_actions::outline::ToggleOutline,
                                             &focus_handle,
                                             cx,
                                         )),
@@ -6662,7 +6662,7 @@ pub fn render_breadcrumb_text(
                             move |_, window, cx| {
                                 if let Some((editor, callback)) = editor
                                     .upgrade()
-                                    .zip(aayushicode_actions::outline::TOGGLE_OUTLINE.get())
+                                    .zip(aaykra_actions::outline::TOGGLE_OUTLINE.get())
                                 {
                                     callback(editor.to_any_view(), window, cx);
                                 }

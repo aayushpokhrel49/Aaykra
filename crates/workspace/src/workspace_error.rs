@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use gpui::{Action, SharedString};
 use ui::{IconName, IconPosition};
-use aayushicode_actions::OpenBrowser;
+use aaykra_actions::OpenBrowser;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {

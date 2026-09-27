@@ -244,8 +244,8 @@ use workspace::{
     notifications::{DetachAndPromptErr, NotificationId, NotifyResultExt, NotifyTaskExt},
     searchable::SearchEvent,
 };
-pub use aayushicode_actions::editor::RevealInFileManager;
-use aayushicode_actions::editor::{MoveDown, MoveUp};
+pub use aaykra_actions::editor::RevealInFileManager;
+use aaykra_actions::editor::{MoveDown, MoveUp};
 
 use crate::{
     bookmarks::BookmarksTabState,
@@ -8638,7 +8638,7 @@ impl Editor {
 
     fn copy_path(
         &mut self,
-        _: &aayushicode_actions::workspace::CopyPath,
+        _: &aaykra_actions::workspace::CopyPath,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -8653,7 +8653,7 @@ impl Editor {
 
     fn copy_relative_path(
         &mut self,
-        _: &aayushicode_actions::workspace::CopyRelativePath,
+        _: &aaykra_actions::workspace::CopyRelativePath,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {

@@ -1,0 +1,22 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$APP_NAME
+GenericName=Text Editor
+Comment=A fast, native code editor.
+TryExec=$APP_CLI
+StartupNotify=$DO_STARTUP_NOTIFY
+StartupWMClass=$APP_ID
+Exec=$APP_CLI $APP_ARGS
+Icon=$APP_ICON
+Categories=Utility;TextEditor;Development;IDE;
+Keywords=aaykra;codeeditor;
+# To add Aaykra to "Open Folder With..." context menu, add `inode/directory` to the MimeType field (semicolon separated)
+# Arch linux users have reported this setting Aaykra as default file browser. See https://github.com/zed-industries/zed/pull/39076 and related issues.
+# If this happens to you, an unconfirmed fix may be to install Arch's `gnome-defaults-list` package.
+MimeType=text/plain;application/x-zerosize;x-scheme-handler/aaykra;
+Actions=NewWorkspace;
+
+[Desktop Action NewWorkspace]
+Exec=$APP_CLI --new $APP_ARGS
+Name=Open a new workspace

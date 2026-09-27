@@ -45,10 +45,10 @@ done
 
 export ZED_BUNDLE=true
 
-channel=$(<crates/aayushicode/RELEASE_CHANNEL)
+channel=$(<crates/aaykra/RELEASE_CHANNEL)
 target_dir="${CARGO_TARGET_DIR:-target}"
 
-version="$(script/get-crate-version aayushicode)"
+version="$(script/get-crate-version aaykra)"
 # Set RELEASE_VERSION so it's compiled into GPUI and it knows about the version.
 export RELEASE_VERSION="${version}"
 
@@ -83,7 +83,7 @@ if [[ "$(uname -m)" == "aarch64" ]]; then
 else
     export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
 fi
-cargo build --release --target "${target_triple}" --package aayushicode --package cli
+cargo build --release --target "${target_triple}" --package aaykra --package cli
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
 if [[ "$remote_server_triple" == "$musl_triple" ]]; then
@@ -145,21 +145,21 @@ cp $(find_libs) "${app_dir}/lib"
 # App identity: the app ID doubles as the Wayland window ID, so an icon file
 # named after it must be installed for compositors to show a window/taskbar icon.
 APP_NAME="AAYKRA"
-APP_ID="me.aayush.Aayushi-Code"
+APP_ID="me.aayush.Aaykra"
 if [[ "$channel" == "dev" ]]; then
   APP_NAME="AAYKRA Dev"
-  APP_ID="me.aayush.Aayushi-Code-Dev"
+  APP_ID="me.aayush.Aaykra-Dev"
 fi
 
 # Icons. The generic `aaykra` name covers the desktop entry's
 # `Icon=aaykra`; the app-id-named copy lets Wayland compositors resolve
 # the window/taskbar icon (they look the icon up by the window's app_id).
 mkdir -p "${app_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/aayushicode/resources/app-icon$suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/aaykra.png"
-cp "crates/aayushicode/resources/app-icon$suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/${APP_ID}.png"
+cp "crates/aaykra/resources/app-icon$suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/aaykra.png"
+cp "crates/aaykra/resources/app-icon$suffix.png" "${app_dir}/share/icons/hicolor/512x512/apps/${APP_ID}.png"
 mkdir -p "${app_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/aayushicode/resources/app-icon$suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/aaykra.png"
-cp "crates/aayushicode/resources/app-icon$suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/${APP_ID}.png"
+cp "crates/aaykra/resources/app-icon$suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/aaykra.png"
+cp "crates/aaykra/resources/app-icon$suffix@2x.png" "${app_dir}/share/icons/hicolor/1024x1024/apps/${APP_ID}.png"
 
 # .desktop
 export DO_STARTUP_NOTIFY="true"
@@ -170,7 +170,7 @@ export APP_NAME="${APP_NAME}"
 export APP_ID="${APP_ID}"
 
 mkdir -p "${app_dir}/share/applications"
-envsubst < "crates/aayushicode/resources/zed.desktop.in" > "${app_dir}/share/applications/$APP_ID.desktop"
+envsubst < "crates/aaykra/resources/zed.desktop.in" > "${app_dir}/share/applications/$APP_ID.desktop"
 chmod +x "${app_dir}/share/applications/$APP_ID.desktop"
 
 # Copy generated licenses so they'll end up in archive too

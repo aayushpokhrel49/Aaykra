@@ -18,7 +18,7 @@ use workspace::{
     SerializedWorkspaceLocation, Workspace, WorkspaceDb, notifications::DetachAndPromptErr,
 };
 
-use aayushicode_actions::OpenRemote;
+use aaykra_actions::OpenRemote;
 
 use crate::{highlights_for_path, icon_for_remote_connection, open_remote_project};
 

@@ -32,9 +32,9 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
       - name: Check that the version matches the crate version
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/aayushicode/Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/aaykra/Cargo.toml | head -1)
           if [ "${version}" != "${{ steps.version.outputs.version }}" ]; then
-            echo "Release version ${{ steps.version.outputs.version }} does not match crates/aayushicode/Cargo.toml version ${version}"
+            echo "Release version ${{ steps.version.outputs.version }} does not match crates/aaykra/Cargo.toml version ${version}"
             exit 1
           fi
       - name: Check that the changelog has entries for this version
@@ -61,7 +61,7 @@ jobs:
       - name: Install lld
         run: brew install lld
       - name: Use the stable release channel
-        run: echo stable > crates/aayushicode/RELEASE_CHANNEL
+        run: echo stable > crates/aaykra/RELEASE_CHANNEL
       # Signing and notarization only happen when these secrets exist.
       # Without them the bundle is ad-hoc signed.
       - name: Prepare provisioning profile
@@ -117,7 +117,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Use the stable release channel
-        run: echo stable > crates/aayushicode/RELEASE_CHANNEL
+        run: echo stable > crates/aaykra/RELEASE_CHANNEL
       - name: Bundle
         run: ./script/bundle-linux
       - uses: actions/upload-artifact@v4
@@ -150,7 +150,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Use the stable release channel
-        run: echo stable > crates/aayushicode/RELEASE_CHANNEL
+        run: echo stable > crates/aaykra/RELEASE_CHANNEL
       - name: Build .deb package
         run: ./script/bundle-deb
       - uses: actions/upload-artifact@v4
@@ -183,7 +183,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Use the stable release channel
-        run: echo stable > crates/aayushicode/RELEASE_CHANNEL
+        run: echo stable > crates/aaykra/RELEASE_CHANNEL
       - name: Build Arch Linux package
         run: ./script/bundle-arch
       - uses: actions/upload-artifact@v4
@@ -201,7 +201,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Use the stable release channel
-        run: Set-Content -Path crates/aayushicode/RELEASE_CHANNEL -Value stable -NoNewline
+        run: Set-Content -Path crates/aaykra/RELEASE_CHANNEL -Value stable -NoNewline
         shell: pwsh
       - name: Bundle
         run: script/bundle-windows.ps1 -Architecture x86_64
@@ -232,13 +232,13 @@ jobs:
         run: |
           cd artifacts
           for arch in x86_64 aarch64; do
-            [ -f "aaykra-linux-${arch}.tar.gz" ] && cp "aaykra-linux-${arch}.tar.gz" "aayushicode-linux-${arch}.tar.gz" || true
-            [ -f "aaykra-${arch}.dmg" ] && cp "aaykra-${arch}.dmg" "AayushiCode-${arch}.dmg" || true
-            [ -f "aaykra-remote-server-linux-${arch}.gz" ] && cp "aaykra-remote-server-linux-${arch}.gz" "aayushicode-remote-server-linux-${arch}.gz" || true
-            [ -f "aaykra-remote-server-macos-${arch}.gz" ] && cp "aaykra-remote-server-macos-${arch}.gz" "aayushicode-remote-server-macos-${arch}.gz" || true
+            [ -f "aaykra-linux-${arch}.tar.gz" ] && cp "aaykra-linux-${arch}.tar.gz" "aaykra-linux-${arch}.tar.gz" || true
+            [ -f "aaykra-${arch}.dmg" ] && cp "aaykra-${arch}.dmg" "Aaykra-${arch}.dmg" || true
+            [ -f "aaykra-remote-server-linux-${arch}.gz" ] && cp "aaykra-remote-server-linux-${arch}.gz" "aaykra-remote-server-linux-${arch}.gz" || true
+            [ -f "aaykra-remote-server-macos-${arch}.gz" ] && cp "aaykra-remote-server-macos-${arch}.gz" "aaykra-remote-server-macos-${arch}.gz" || true
           done
-          [ -f "aaykra-x86_64.exe" ] && cp "aaykra-x86_64.exe" "AayushiCode-x86_64.exe" || true
-          [ -f "aaykra-remote-server-windows-x86_64.gz" ] && cp "aaykra-remote-server-windows-x86_64.gz" "aayushicode-remote-server-windows-x86_64.gz" || true
+          [ -f "aaykra-x86_64.exe" ] && cp "aaykra-x86_64.exe" "Aaykra-x86_64.exe" || true
+          [ -f "aaykra-remote-server-windows-x86_64.gz" ] && cp "aaykra-remote-server-windows-x86_64.gz" "aaykra-remote-server-windows-x86_64.gz" || true
       - name: Write the release body
         run: |
           version="${{ needs.check_version.outputs.version }}"

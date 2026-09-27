@@ -31,7 +31,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Use the stable release channel
-        run: echo stable > crates/aayushicode/RELEASE_CHANNEL
+        run: echo stable > crates/aaykra/RELEASE_CHANNEL
       - name: Build .deb package
         run: ./script/bundle-deb
       - name: Verify package

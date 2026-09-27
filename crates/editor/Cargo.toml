@@ -98,7 +98,7 @@ urlencoding.workspace = true
 util.workspace = true
 uuid.workspace = true
 workspace.workspace = true
-aayushicode_actions.workspace = true
+aaykra_actions.workspace = true
 zlog.workspace = true
 
 [dev-dependencies]

@@ -83,7 +83,7 @@ fn generate_markdown(seed: u64, target_size: usize) -> String {
 
     markdown.push_str("---\n");
     markdown.push_str("title: Markdown renderer benchmark\n");
-    markdown.push_str("author: Aayushi Code benchmark\n");
+    markdown.push_str("author: Aaykra benchmark\n");
     markdown.push_str("---\n\n");
 
     while markdown.len() < target_size {

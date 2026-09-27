@@ -31,7 +31,7 @@ actions!(
 
 pub fn open(
     workspace: &mut Workspace,
-    _: &aayushicode_actions::git::ViewStash,
+    _: &aaykra_actions::git::ViewStash,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {

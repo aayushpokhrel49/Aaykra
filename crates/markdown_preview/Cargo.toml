@@ -30,7 +30,7 @@ ui.workspace = true
 urlencoding.workspace = true
 util.workspace = true
 workspace.workspace = true
-aayushicode_actions.workspace = true
+aaykra_actions.workspace = true
 
 [dev-dependencies]
 buffer_diff.workspace = true

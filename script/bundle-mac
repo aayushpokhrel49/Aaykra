@@ -51,7 +51,7 @@ shift $((OPTIND-1))
 
 
 # Get release channel
-pushd crates/aayushicode
+pushd crates/aaykra
 channel=$(<RELEASE_CHANNEL)
 export ZED_RELEASE_CHANNEL="${channel}"
 popd
@@ -89,13 +89,13 @@ script/generate-licenses
 rustup target add $target_triple
 
 echo "Compiling zed binaries"
-cargo build ${build_flag} --package aayushicode --package cli --target $target_triple
+cargo build ${build_flag} --package aaykra --package cli --target $target_triple
 # Build remote_server in separate invocation to prevent feature unification from other crates
 # from influencing dynamic libraries required by it.
 cargo build ${build_flag} --package remote_server --target $target_triple
 
 echo "Creating application bundle"
-pushd crates/aayushicode
+pushd crates/aaykra
 cp Cargo.toml Cargo.toml.backup
 sed \
     -i.backup \
@@ -110,7 +110,7 @@ echo "Bundled ${app_path}"
 
 # DocumentTypes.plist references CFBundleTypeIconFile "Document", so the bundle must contain Document.icns.
 # We use the app icon as a placeholder document icon for now.
-document_icon_source="crates/aayushicode/resources/Document.icns"
+document_icon_source="crates/aaykra/resources/Document.icns"
 document_icon_target="${app_path}/Contents/Resources/Document.icns"
 if [[ -f "${document_icon_source}" ]]; then
     mkdir -p "$(dirname "${document_icon_target}")"
@@ -212,8 +212,8 @@ function sign_app_binaries() {
         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/aayushicode/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/aaykra" -v
-        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/aayushicode/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/aaykra/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/aaykra" -v
+        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/aaykra/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
     else
         echo "One or more of the following variables are missing: MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID, APPLE_NOTARIZATION_ISSUER_ID"
 
@@ -225,7 +225,7 @@ function sign_app_binaries() {
         # - create a PR and tag it with the `run-bundling` label, and download the .dmg file from there.
         # - create your own signing key and set APPLE_NOTARIZATION_TEAM to your own team ID
         # then comment out this line.
-        cat crates/aayushicode/resources/zed.entitlements | sed '/com.apple.developer.associated-domains/,+1d' > "${app_path}/Contents/Resources/zed.entitlements"
+        cat crates/aaykra/resources/zed.entitlements | sed '/com.apple.developer.associated-domains/,+1d' > "${app_path}/Contents/Resources/zed.entitlements"
 
         codesign --force --deep --entitlements "${app_path}/Contents/Resources/zed.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
     fi
@@ -292,7 +292,7 @@ function sign_binary() {
 
     if [[ $can_code_sign = true ]]; then
         echo "Code signing executable $binary_path"
-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/aayushicode/resources/zed.entitlements --sign "$IDENTITY" "${binary_path}" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/aaykra/resources/zed.entitlements --sign "$IDENTITY" "${binary_path}" -v
     fi
 }
 

@@ -202,7 +202,7 @@ pub enum IconName {
     Unpin,
     UserCheck,
     Warning,
-    Aayushicode,
+    Aaykra,
     WholeWord,
     XCircle,
 }

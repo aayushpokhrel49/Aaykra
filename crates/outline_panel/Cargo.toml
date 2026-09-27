@@ -39,7 +39,7 @@ ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 worktree.workspace = true
-aayushicode_actions.workspace = true
+aaykra_actions.workspace = true
 
 [dev-dependencies]
 lsp.workspace = true

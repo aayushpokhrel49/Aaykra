@@ -296,7 +296,7 @@ pub struct SettingsContent {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct InstrumentationSettingsContent {
     /// Configuration for the performance profiler, accessed via the
-    /// `aayushicode: open performance profiler` action.
+    /// `aaykra: open performance profiler` action.
     pub performance_profiler: Option<PerformanceProfilerSettingsContent>,
 }
 

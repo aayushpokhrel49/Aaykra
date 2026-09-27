@@ -16,7 +16,7 @@ use theme_settings::{
 use ui::{ListItem, ListItemSpacing, prelude::*, v_flex};
 use util::ResultExt;
 use workspace::{ModalView, Workspace, ui::HighlightedLabel, with_active_or_new_workspace};
-use aayushicode_actions::{ExtensionCategoryFilter, Extensions};
+use aaykra_actions::{ExtensionCategoryFilter, Extensions};
 
 use crate::icon_theme_selector::{IconThemeSelector, IconThemeSelectorDelegate};
 
@@ -29,13 +29,13 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
-    cx.on_action(|action: &aayushicode_actions::theme_selector::Toggle, cx| {
+    cx.on_action(|action: &aaykra_actions::theme_selector::Toggle, cx| {
         let action = action.clone();
         with_active_or_new_workspace(cx, move |workspace, window, cx| {
             toggle_theme_selector(workspace, &action, window, cx);
         });
     });
-    cx.on_action(|action: &aayushicode_actions::icon_theme_selector::Toggle, cx| {
+    cx.on_action(|action: &aaykra_actions::icon_theme_selector::Toggle, cx| {
         let action = action.clone();
         with_active_or_new_workspace(cx, move |workspace, window, cx| {
             toggle_icon_theme_selector(workspace, &action, window, cx);
@@ -45,7 +45,7 @@ pub fn init(cx: &mut App) {
 
 fn toggle_theme_selector(
     workspace: &mut Workspace,
-    toggle: &aayushicode_actions::theme_selector::Toggle,
+    toggle: &aaykra_actions::theme_selector::Toggle,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -63,7 +63,7 @@ fn toggle_theme_selector(
 
 fn toggle_icon_theme_selector(
     workspace: &mut Workspace,
-    toggle: &aayushicode_actions::icon_theme_selector::Toggle,
+    toggle: &aaykra_actions::icon_theme_selector::Toggle,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -631,7 +631,7 @@ mod tests {
         workspace: &Entity<workspace::Workspace>,
         cx: &mut VisualTestContext,
     ) -> Entity<Picker<ThemeSelectorDelegate>> {
-        cx.dispatch_action(aayushicode_actions::theme_selector::Toggle {
+        cx.dispatch_action(aaykra_actions::theme_selector::Toggle {
             themes_filter: None,
         });
         cx.run_until_parked();

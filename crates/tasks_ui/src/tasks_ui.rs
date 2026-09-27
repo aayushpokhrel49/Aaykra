@@ -491,7 +491,7 @@ mod tests {
         fs.insert_tree(
             path!("/dir"),
             json!({
-                ".aayushicode": {
+                ".aaykra": {
                     "tasks.json": r#"[
                             {
                                 "label": "example task",

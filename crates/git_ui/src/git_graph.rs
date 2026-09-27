@@ -41,7 +41,7 @@ use std::{
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
-use aayushicode_actions::{
+use aaykra_actions::{
     buffer_search,
     search::{SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive},
 };

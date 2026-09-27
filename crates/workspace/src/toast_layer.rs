@@ -8,7 +8,7 @@ use gpui::{
     Task,
 };
 use ui::{animation::DefaultAnimations, prelude::*};
-use aayushicode_actions::toast;
+use aaykra_actions::toast;
 
 use crate::Workspace;
 

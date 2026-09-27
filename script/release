@@ -18,7 +18,7 @@ fi
 
 cd "$(dirname "$0")/.."
 
-manifest=crates/aayushicode/Cargo.toml
+manifest=crates/aaykra/Cargo.toml
 changelog=.github/release/CHANGELOG.md
 tag="v$version"
 
@@ -80,7 +80,7 @@ mv "$changelog.tmp" "$changelog"
 sed "s/^version = \"$current\"/version = \"$version\"/" "$manifest" > "$manifest.tmp"
 mv "$manifest.tmp" "$manifest"
 
-cargo update --quiet --package aayushicode --offline
+cargo update --quiet --package aaykra --offline
 
 echo "Release notes for $version:"
 script/changelog-section "$version" | sed 's/^/  /'

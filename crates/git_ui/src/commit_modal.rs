@@ -9,7 +9,7 @@ use ui::{
     ButtonLike, ContextMenu, ContextMenuEntry, DocumentationSide, ElevationIndex, KeybindingHint,
     PopoverMenu, PopoverMenuHandle, SplitButton, Tooltip, prelude::*,
 };
-use aayushicode_actions::{DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize};
+use aaykra_actions::{DecreaseBufferFontSize, IncreaseBufferFontSize, ResetBufferFontSize};
 
 use editor::{Editor, EditorElement};
 use gpui::*;
@@ -374,7 +374,7 @@ impl CommitModal {
                     .color(Color::Placeholder),
             )
             .on_click(cx.listener(|_, _, window, cx| {
-                window.dispatch_action(aayushicode_actions::git::Branch.boxed_clone(), cx);
+                window.dispatch_action(aaykra_actions::git::Branch.boxed_clone(), cx);
             }));
 
         let branch_picker = PopoverMenu::new("popover-button")
@@ -390,7 +390,7 @@ impl CommitModal {
             .with_handle(self.branch_list_handle.clone())
             .trigger_with_tooltip(
                 branch_picker_button,
-                Tooltip::for_action_title("Switch Branch", &aayushicode_actions::git::Branch),
+                Tooltip::for_action_title("Switch Branch", &aaykra_actions::git::Branch),
             )
             .anchor(Anchor::BottomLeft)
             .offset(gpui::Point {
@@ -590,17 +590,17 @@ impl Render for CommitModal {
             .on_action(cx.listener(Self::decrease_font_size))
             .on_action(cx.listener(Self::reset_font_size))
             .on_action(
-                cx.listener(|this, _: &aayushicode_actions::git::Branch, window, cx| {
+                cx.listener(|this, _: &aaykra_actions::git::Branch, window, cx| {
                     this.toggle_branch_selector(window, cx);
                 }),
             )
             .on_action(
-                cx.listener(|this, _: &aayushicode_actions::git::CheckoutBranch, window, cx| {
+                cx.listener(|this, _: &aaykra_actions::git::CheckoutBranch, window, cx| {
                     this.toggle_branch_selector(window, cx);
                 }),
             )
             .on_action(
-                cx.listener(|this, _: &aayushicode_actions::git::Switch, window, cx| {
+                cx.listener(|this, _: &aaykra_actions::git::Switch, window, cx| {
                     this.toggle_branch_selector(window, cx);
                 }),
             )

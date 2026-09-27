@@ -445,16 +445,16 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
         (
             TaskSourceKind::Worktree {
                 id: worktree_1,
-                directory_in_worktree: rel_path(".aayushicode").into(),
-                id_base: "local worktree tasks from directory \".aayushicode\"".into(),
+                directory_in_worktree: rel_path(".aaykra").into(),
+                id_base: "local worktree tasks from directory \".aaykra\"".into(),
             },
             common_name.to_string(),
         ),
         (
             TaskSourceKind::Worktree {
                 id: worktree_1,
-                directory_in_worktree: rel_path(".aayushicode").into(),
-                id_base: "local worktree tasks from directory \".aayushicode\"".into(),
+                directory_in_worktree: rel_path(".aaykra").into(),
+                id_base: "local worktree tasks from directory \".aaykra\"".into(),
             },
             "worktree_1".to_string(),
         ),
@@ -463,16 +463,16 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
         (
             TaskSourceKind::Worktree {
                 id: worktree_2,
-                directory_in_worktree: rel_path(".aayushicode").into(),
-                id_base: "local worktree tasks from directory \".aayushicode\"".into(),
+                directory_in_worktree: rel_path(".aaykra").into(),
+                id_base: "local worktree tasks from directory \".aaykra\"".into(),
             },
             common_name.to_string(),
         ),
         (
             TaskSourceKind::Worktree {
                 id: worktree_2,
-                directory_in_worktree: rel_path(".aayushicode").into(),
-                id_base: "local worktree tasks from directory \".aayushicode\"".into(),
+                directory_in_worktree: rel_path(".aaykra").into(),
+                id_base: "local worktree tasks from directory \".aaykra\"".into(),
             },
             "worktree_2".to_string(),
         ),
@@ -493,7 +493,7 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
             .update_file_based_tasks(
                 TaskSettingsLocation::Worktree(SettingsLocation {
                     worktree_id: worktree_1,
-                    path: rel_path(".aayushicode"),
+                    path: rel_path(".aaykra"),
                 }),
                 Some(&mock_tasks_from_names(
                     worktree_1_tasks.iter().map(|(_, name)| name.as_str()),
@@ -504,7 +504,7 @@ async fn test_inventory_static_task_filters(cx: &mut TestAppContext) {
             .update_file_based_tasks(
                 TaskSettingsLocation::Worktree(SettingsLocation {
                     worktree_id: worktree_2,
-                    path: rel_path(".aayushicode"),
+                    path: rel_path(".aaykra"),
                 }),
                 Some(&mock_tasks_from_names(
                     worktree_2_tasks.iter().map(|(_, name)| name.as_str()),
@@ -588,7 +588,7 @@ async fn test_zed_tasks_take_precedence_over_vscode(cx: &mut TestAppContext) {
             .update_file_based_tasks(
                 TaskSettingsLocation::Worktree(SettingsLocation {
                     worktree_id,
-                    path: rel_path(".aayushicode"),
+                    path: rel_path(".aaykra"),
                 }),
                 Some(&mock_tasks_from_names(["zed_task"])),
             )
@@ -597,14 +597,14 @@ async fn test_zed_tasks_take_precedence_over_vscode(cx: &mut TestAppContext) {
     assert_eq!(
         task_template_names(&inventory, Some(worktree_id), cx).await,
         vec!["zed_task"],
-        "With both .aayushicode and .vscode tasks, only .aayushicode tasks should appear"
+        "With both .aaykra and .vscode tasks, only .aaykra tasks should appear"
     );
 
     register_worktree_task_used(&inventory, worktree_id, "zed_task", cx).await;
     let resolved = resolved_task_names(&inventory, Some(worktree_id), cx).await;
     assert!(
         !resolved.iter().any(|name| name == "vscode_task"),
-        "Previously used .vscode tasks should not appear when .aayushicode tasks exist, got: {resolved:?}"
+        "Previously used .vscode tasks should not appear when .aaykra tasks exist, got: {resolved:?}"
     );
 }
 

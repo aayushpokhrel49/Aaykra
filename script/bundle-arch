@@ -39,8 +39,8 @@ export ZED_BUNDLE=true
 
 target_dir="${CARGO_TARGET_DIR:-target}"
 
-channel=$(<crates/aayushicode/RELEASE_CHANNEL)
-version="$(script/get-crate-version aayushicode)"
+channel=$(<crates/aaykra/RELEASE_CHANNEL)
+version="$(script/get-crate-version aaykra)"
 export RELEASE_VERSION="${version}"
 
 export CC="${CC:-$(command -v clang)}"
@@ -64,7 +64,7 @@ else
     exit 1
 fi
 
-cargo build --release --package aayushicode --package cli
+cargo build --release --package aaykra --package cli
 
 llvm-objcopy --strip-debug "${target_dir}/release/aaykra"
 llvm-objcopy --strip-debug "${target_dir}/release/cli"
@@ -97,18 +97,18 @@ mkdir -p "${install_dir}/lib"
 cp $(find_libs) "${install_dir}/lib"
 
 APP_NAME="AAYKRA"
-APP_ID="me.aayush.Aayushi-Code"
+APP_ID="me.aayush.Aaykra"
 if [ "$channel" == "dev" ]; then
     APP_NAME="AAYKRA Dev"
-    APP_ID="me.aayush.Aayushi-Code-Dev"
+    APP_ID="me.aayush.Aaykra-Dev"
 fi
 
 mkdir -p "${package_root}/usr/share/icons/hicolor/512x512/apps"
-cp "crates/aayushicode/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/aaykra.png"
-cp "crates/aayushicode/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/${APP_ID}.png"
+cp "crates/aaykra/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/aaykra.png"
+cp "crates/aaykra/resources/app-icon${suffix}.png" "${package_root}/usr/share/icons/hicolor/512x512/apps/${APP_ID}.png"
 mkdir -p "${package_root}/usr/share/icons/hicolor/1024x1024/apps"
-cp "crates/aayushicode/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/aaykra.png"
-cp "crates/aayushicode/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/${APP_ID}.png"
+cp "crates/aaykra/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/aaykra.png"
+cp "crates/aaykra/resources/app-icon${suffix}@2x.png" "${package_root}/usr/share/icons/hicolor/1024x1024/apps/${APP_ID}.png"
 
 export DO_STARTUP_NOTIFY="true"
 export APP_CLI="aaykra"
@@ -118,7 +118,7 @@ export APP_NAME="${APP_NAME}"
 export APP_ID="${APP_ID}"
 
 mkdir -p "${package_root}/usr/share/applications"
-envsubst < "crates/aayushicode/resources/zed.desktop.in" > "${package_root}/usr/share/applications/${APP_ID}.desktop"
+envsubst < "crates/aaykra/resources/zed.desktop.in" > "${package_root}/usr/share/applications/${APP_ID}.desktop"
 chmod +x "${package_root}/usr/share/applications/${APP_ID}.desktop"
 
 if [ -f "assets/licenses.md" ]; then

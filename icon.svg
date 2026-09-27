@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
   <defs>
-    <linearGradient id="aayushi-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+    <linearGradient id="aaykra-grad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#8B5CF6" />
       <stop offset="30%" stop-color="#3B82F6" />
       <stop offset="65%" stop-color="#06B6D4" />
@@ -10,6 +10,6 @@
   <rect width="32" height="32" rx="7" fill="#14141A" />
   <rect width="32" height="32" rx="7" stroke="rgba(255,255,255,0.12)" stroke-width="0.8" />
   <path d="M16 5L25 24H20.5L16 14.5L11.5 24H7L16 5Z" fill="#FFFFFF" fill-opacity="0.95" />
-  <path d="M12.5 19H19.5L18.2 21.8H13.8L12.5 19Z" fill="url(#aayushi-grad)" />
+  <path d="M12.5 19H19.5L18.2 21.8H13.8L12.5 19Z" fill="url(#aaykra-grad)" />
   <circle cx="16" cy="5.5" r="1.2" fill="#06B6D4" />
 </svg>

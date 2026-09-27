@@ -26,7 +26,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
       - name: Use the stable release channel
-        run: Set-Content -Path crates/aayushicode/RELEASE_CHANNEL -Value stable -NoNewline
+        run: Set-Content -Path crates/aaykra/RELEASE_CHANNEL -Value stable -NoNewline
         shell: pwsh
       - name: Build .exe installer
         run: ./script/bundle-windows.ps1 -Architecture x86_64

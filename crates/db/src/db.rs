@@ -27,7 +27,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{LazyLock, atomic::Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use util::ResultExt;
-use aayushicode_env_vars::ZED_STATELESS;
+use aaykra_env_vars::ZED_STATELESS;
 
 /// A migration registered via `static_connection!` and collected at link time.
 pub struct DomainMigration {

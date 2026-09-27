@@ -115,7 +115,7 @@ echo "  AAYKRA:  $(to_mb "$aaykra_median") MB"
 echo "  Zed: $(to_mb "$zed_median") MB"
 
 if [[ "$zed_median" -gt 0 ]]; then
-  awk -v aayushicode="$aaykra_median" -v zed="$zed_median" 'BEGIN {
-    printf "  AAYKRA uses %.0f%% less memory than Zed\n", (1 - aayushicode / zed) * 100
+  awk -v aaykra="$aaykra_median" -v zed="$zed_median" 'BEGIN {
+    printf "  AAYKRA uses %.0f%% less memory than Zed\n", (1 - aaykra / zed) * 100
   }'
 fi

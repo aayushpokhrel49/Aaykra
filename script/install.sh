@@ -98,14 +98,14 @@ linux() {
     appid=""
     case "$channel" in
       stable)
-        appid="me.aayush.Aayushi-Code"
+        appid="me.aayush.Aaykra"
         ;;
       dev)
-        appid="me.aayush.Aayushi-Code-Dev"
+        appid="me.aayush.Aaykra-Dev"
         ;;
       *)
         echo "Unknown release channel: ${channel}. Using stable app ID."
-        appid="me.aayush.Aayushi-Code"
+        appid="me.aayush.Aaykra"
         ;;
     esac
 

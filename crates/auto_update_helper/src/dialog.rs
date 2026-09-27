@@ -40,7 +40,7 @@ struct DialogInfo {
 
 pub(crate) fn create_dialog_window(receiver: Receiver<Result<()>>) -> Result<HWND> {
     unsafe {
-        let class_name = windows::core::w!("Aayushi-Code-Auto-Updater-Dialog-Class");
+        let class_name = windows::core::w!("Aaykra-Auto-Updater-Dialog-Class");
         let module = GetModuleHandleW(None).context("unable to get module handle")?;
         let handle = LoadImageW(
             Some(module.into()),

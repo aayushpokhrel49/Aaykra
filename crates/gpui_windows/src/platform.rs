@@ -1477,7 +1477,7 @@ fn handle_gpu_device_lost(
     Ok(())
 }
 
-const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Aayushi::PlatformWindow");
+const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Aaykra::PlatformWindow");
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {

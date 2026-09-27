@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_methods, reason = "build scripts are exempt")]
 use std::process::Command;
 
-const ZED_MANIFEST: &str = include_str!("../aayushicode/Cargo.toml");
+const ZED_MANIFEST: &str = include_str!("../aaykra/Cargo.toml");
 
 fn main() {
     let zed_cargo_toml: cargo_toml::Manifest =

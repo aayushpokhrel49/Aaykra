@@ -19,8 +19,8 @@
   {
     "context": "Editor",
     "bindings": {
-      "ctrl->": ["aayushicode::IncreaseBufferFontSize", { "persist": true }],
-      "ctrl-<": ["aayushicode::DecreaseBufferFontSize", { "persist": true }],
+      "ctrl->": ["aaykra::IncreaseBufferFontSize", { "persist": true }],
+      "ctrl-<": ["aaykra::DecreaseBufferFontSize", { "persist": true }],
       "ctrl-shift-j": "editor::JoinLines",
       "cmd-d": "editor::DuplicateSelection",
       "cmd-backspace": "editor::DeleteLine",

@@ -1385,7 +1385,7 @@ enum WindowOpenState {
     Windowed,
 }
 
-const WINDOW_CLASS_NAME: PCWSTR = w!("Aayushi::Window");
+const WINDOW_CLASS_NAME: PCWSTR = w!("Aaykra::Window");
 
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();

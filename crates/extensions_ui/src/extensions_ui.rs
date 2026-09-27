@@ -38,7 +38,7 @@ use workspace::{
     item::{Item, ItemEvent},
     workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError},
 };
-use aayushicode_actions::ExtensionCategoryFilter;
+use aaykra_actions::ExtensionCategoryFilter;
 
 use crate::components::{ExtensionCard, extension_provides_label, remote_extension_status};
 use crate::extension_version_selector::{
@@ -46,7 +46,7 @@ use crate::extension_version_selector::{
 };
 
 actions!(
-    aayushicode,
+    aaykra,
     [
         /// Installs an extension from a local directory for development.
         InstallDevExtension,
@@ -55,7 +55,7 @@ actions!(
 
 /// Rebuilds an installed dev extension.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, JsonSchema, gpui::Action)]
-#[action(namespace = aayushicode)]
+#[action(namespace = aaykra)]
 #[serde(deny_unknown_fields)]
 pub struct RebuildDevExtension {
     /// The ID of the dev extension to rebuild.
@@ -114,7 +114,7 @@ pub fn init(cx: &mut App) {
         };
         workspace
             .register_action(
-                move |workspace, action: &aayushicode_actions::Extensions, window, cx| {
+                move |workspace, action: &aaykra_actions::Extensions, window, cx| {
                     let provides_filter = action.category_filter.map(|category| match category {
                         ExtensionCategoryFilter::Themes => ExtensionProvides::Themes,
                         ExtensionCategoryFilter::IconThemes => ExtensionProvides::IconThemes,
@@ -477,7 +477,7 @@ impl ExtensionsPage {
             workspace
                 .update(cx, |_workspace, cx| {
                     window.dispatch_action(
-                        aayushicode_actions::theme_selector::Toggle {
+                        aaykra_actions::theme_selector::Toggle {
                             themes_filter: Some(themes),
                         }
                         .boxed_clone(),
@@ -496,7 +496,7 @@ impl ExtensionsPage {
             workspace
                 .update(cx, |_workspace, cx| {
                     window.dispatch_action(
-                        aayushicode_actions::icon_theme_selector::Toggle {
+                        aaykra_actions::icon_theme_selector::Toggle {
                             themes_filter: Some(icon_themes),
                         }
                         .boxed_clone(),

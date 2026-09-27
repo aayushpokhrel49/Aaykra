@@ -235,7 +235,7 @@ fn render_base_keymap_section(tab_index: &mut isize, cx: &mut App) -> impl IntoE
         ToggleButtonGroup::two_rows(
             "base_keymap_selection",
             [
-                ToggleButtonWithIcon::new("AAYKRA", IconName::Aayushicode, |_, _, cx| {
+                ToggleButtonWithIcon::new("AAYKRA", IconName::Aaykra, |_, _, cx| {
                     write_keymap_base(BaseKeymap::Zed, cx);
                 }),
                 ToggleButtonWithIcon::new("VS Code", IconName::EditorVsCode, |_, _, cx| {
@@ -393,7 +393,7 @@ fn render_install_cli_section(tab_index: &mut isize) -> impl IntoElement {
                 .max_w_5_6()
                 .child(Label::new("Terminal Command"))
                 .child(
-                    Label::new("Open files and folders from the terminal with the aayushicode command")
+                    Label::new("Open files and folders from the terminal with the aaykra command")
                         .color(Color::Muted),
                 ),
         )

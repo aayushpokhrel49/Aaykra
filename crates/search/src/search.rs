@@ -9,7 +9,7 @@ use ui::{IconButtonShape, Tooltip, prelude::*};
 use util::paths::PathMatcher;
 use workspace::notifications::NotificationId;
 use workspace::{Toast, Workspace};
-pub use aayushicode_actions::search::{
+pub use aaykra_actions::search::{
     FocusSearch, SelectNextMatch, SelectPreviousMatch, ToggleCaseSensitive, ToggleIncludeIgnored,
 };
 

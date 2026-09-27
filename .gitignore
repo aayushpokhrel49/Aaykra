@@ -27,10 +27,10 @@
 /assets/*licenses.*
 /crates/collab/seed.json
 /crates/theme/schemas/theme.json
-/crates/aayushicode/resources/flatpak/flatpak-cargo-sources.json
+/crates/aaykra/resources/flatpak/flatpak-cargo-sources.json
 /crates/project_panel/benches/linux_repo_snapshot.txt
-/me.aayush.Aayushi-Code*.json
-/me.aayush.Aayushi-Code-Dev*.json
+/me.aayush.Aaykra*.json
+/me.aayush.Aaykra-Dev*.json
 /node_modules
 /plugins/bin
 /script/node_modules
@@ -47,7 +47,7 @@ xcuserdata/
 # Visual test baseline images (these will be stored outside
 # the repo in the future, but we don't haven't decided exactly
 # where yet, so for now they get generated into a gitignored dir.)
-/crates/aayushicode/test_fixtures/visual_tests/
+/crates/aaykra/test_fixtures/visual_tests/
 
 # Local documentation audit files
 /december-2025-releases.md

@@ -12,9 +12,9 @@
   xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
   xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
   IgnorableNamespaces="uap uap2 uap3 rescap desktop desktop4 desktop5 desktop6 uap10 com">
-  <!-- TODO: Sign the package with an Aayushi Code certificate; the Publisher must match the signing certificate subject. -->
+  <!-- TODO: Sign the package with an Aaykra certificate; the Publisher must match the signing certificate subject. -->
   <Identity
-    Name="AayushPokhrel.AayushiCode"
+    Name="AayushPokhrel.Aaykra"
     Publisher="CN=Aayush Pokhrel"
     Version="1.0.0.0" />
   <Properties>
@@ -39,7 +39,7 @@
     <rescap:Capability Name="unvirtualizedResources"/>
   </Capabilities>
   <Applications>
-    <Application Id="AayushiCode"
+    <Application Id="Aaykra"
       Executable="Aaykra.exe"
       uap10:TrustLevel="mediumIL"
       uap10:RuntimeBehavior="win32App">
@@ -56,19 +56,19 @@
         <desktop4:Extension Category="windows.fileExplorerContextMenus">
           <desktop4:FileExplorerContextMenus>
             <desktop5:ItemType Type="Directory">
-              <desktop5:Verb Id="OpenWithAayushiCode" Clsid="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" />
+              <desktop5:Verb Id="OpenWithAaykra" Clsid="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" />
             </desktop5:ItemType>
             <desktop5:ItemType Type="Directory\Background">
-              <desktop5:Verb Id="OpenWithAayushiCode" Clsid="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" />
+              <desktop5:Verb Id="OpenWithAaykra" Clsid="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" />
             </desktop5:ItemType>
             <desktop5:ItemType Type="*">
-              <desktop5:Verb Id="OpenWithAayushiCode" Clsid="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" />
+              <desktop5:Verb Id="OpenWithAaykra" Clsid="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" />
             </desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
-            <com:SurrogateServer DisplayName="Aayushi Code">
+            <com:SurrogateServer DisplayName="Aaykra">
               <com:Class Id="6a1f6b13-3b82-48a1-9e06-7bb0a6d0bffd" Path="zed_explorer_command_injector.dll" ThreadingModel="STA"/>
             </com:SurrogateServer>
           </com:ComServer>

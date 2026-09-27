@@ -58,14 +58,14 @@ if ($vsDevShell) {
 $workspace = (Resolve-Path "$PSScriptRoot\..").Path
 $env:ZED_WORKSPACE = $workspace
 
-Push-Location -Path "$workspace\crates\aayushicode"
+Push-Location -Path "$workspace\crates\aaykra"
 $channel = Get-Content "RELEASE_CHANNEL"
 $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
 
 if ([string]::IsNullOrWhiteSpace($env:RELEASE_VERSION)) {
-    $cargoToml = Get-Content "$workspace\crates\aayushicode\Cargo.toml"
+    $cargoToml = Get-Content "$workspace\crates\aaykra\Cargo.toml"
     $env:RELEASE_VERSION = ($cargoToml | Select-String -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
 }
 
@@ -76,7 +76,7 @@ function PrepareForBundle {
         Remove-Item -Path "$innoDir" -Recurse -Force
     }
     New-Item -Path "$innoDir" -ItemType Directory -Force
-    Copy-Item -Path "$workspace\crates\aayushicode\resources\windows\*" -Destination "$innoDir" -Recurse -Force
+    Copy-Item -Path "$workspace\crates\aaykra\resources\windows\*" -Destination "$innoDir" -Recurse -Force
     New-Item -Path "$innoDir\make_appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
@@ -89,9 +89,9 @@ function GenerateLicenses {
     . $PSScriptRoot/generate-licenses.ps1
 }
 
-function BuildAayushicodeAndItsFriends {
+function BuildAaykraAndItsFriends {
     Write-Output "Building Aaykra and its friends, for channel: $channel"
-    cargo build --release --package aayushicode --package cli --package auto_update_helper --target $target
+    cargo build --release --package aaykra --package cli --package auto_update_helper --target $target
     Copy-Item -Path ".\$CargoOutDir\aaykra.exe" -Destination "$innoDir\Aaykra.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
@@ -181,14 +181,14 @@ function BuildInstaller {
             $appName = "AAYKRA"
             $appDisplayName = "AAYKRA"
             $appSetupName = "aaykra-$Architecture"
-            # Must match the mutex created in crates/aayushicode/src/aayushicode/windows_only_instance.rs:
+            # Must match the mutex created in crates/aaykra/src/aaykra/windows_only_instance.rs:
             # `{app_identifier()}-Instance-Mutex`.
-            $appMutex = "AayushiCode-Editor-Stable-Instance-Mutex"
+            $appMutex = "Aaykra-Editor-Stable-Instance-Mutex"
             $appExeName = "Aaykra"
-            $regValueName = "AayushiCode"
-            $appUserId = "AayushPokhrel.AayushiCode"
+            $regValueName = "Aaykra"
+            $appUserId = "AayushPokhrel.Aaykra"
             $appShellNameShort = "AAYKRA"
-            $appAppxFullName = "AayushPokhrel.AayushiCode_1.0.0.0_neutral__japxn1gcva8rg"
+            $appAppxFullName = "AayushPokhrel.Aaykra_1.0.0.0_neutral__japxn1gcva8rg"
         }
         "dev" {
             $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
@@ -196,12 +196,12 @@ function BuildInstaller {
             $appName = "AAYKRA Dev"
             $appDisplayName = "AAYKRA Dev"
             $appSetupName = "aaykra-$Architecture"
-            $appMutex = "AayushiCode-Editor-Dev-Instance-Mutex"
+            $appMutex = "Aaykra-Editor-Dev-Instance-Mutex"
             $appExeName = "Aaykra"
-            $regValueName = "AayushiCodeDev"
-            $appUserId = "AayushPokhrel.AayushiCode.Dev"
+            $regValueName = "AaykraDev"
+            $appUserId = "AayushPokhrel.Aaykra.Dev"
             $appShellNameShort = "AAYKRA Dev"
-            $appAppxFullName = "AayushPokhrel.AayushiCode.Dev_1.0.0.0_neutral__japxn1gcva8rg"
+            $appAppxFullName = "AayushPokhrel.Aaykra.Dev_1.0.0.0_neutral__japxn1gcva8rg"
         }
         default {
             Write-Error "can't bundle installer for $channel."
@@ -256,7 +256,7 @@ function BuildInstaller {
 Push-Location $workspace
 PrepareForBundle
 GenerateLicenses
-BuildAayushicodeAndItsFriends
+BuildAaykraAndItsFriends
 BuildRemoteServer
 MakeAppx
 DownloadAMDGpuServices
