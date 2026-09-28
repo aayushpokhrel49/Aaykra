@@ -228,17 +228,12 @@ jobs:
           merge-multiple: true
       - name: Keep debug symbols out of the release assets
         run: find artifacts -name '*.dSYM.zip' -delete
-      - name: Publish legacy asset names so older installs can self-update
-        run: |
-          cd artifacts
-          for arch in x86_64 aarch64; do
-            [ -f "aaykra-linux-${arch}.tar.gz" ] && cp "aaykra-linux-${arch}.tar.gz" "aaykra-linux-${arch}.tar.gz" || true
-            [ -f "aaykra-${arch}.dmg" ] && cp "aaykra-${arch}.dmg" "Aaykra-${arch}.dmg" || true
-            [ -f "aaykra-remote-server-linux-${arch}.gz" ] && cp "aaykra-remote-server-linux-${arch}.gz" "aaykra-remote-server-linux-${arch}.gz" || true
-            [ -f "aaykra-remote-server-macos-${arch}.gz" ] && cp "aaykra-remote-server-macos-${arch}.gz" "aaykra-remote-server-macos-${arch}.gz" || true
-          done
-          [ -f "aaykra-x86_64.exe" ] && cp "aaykra-x86_64.exe" "Aaykra-x86_64.exe" || true
-          [ -f "aaykra-remote-server-windows-x86_64.gz" ] && cp "aaykra-remote-server-windows-x86_64.gz" "aaykra-remote-server-windows-x86_64.gz" || true
+      # Do not publish case-variant copies of the assets (e.g. Aaykra-x86_64.exe next to
+      # aaykra-x86_64.exe) for pre-rebrand installs. GitHub rejects an asset whose name
+      # differs only in case from an existing one, and its releases/download/<tag>/<name>
+      # lookup is already case-insensitive, so those installs resolve the canonical asset.
+      # Uploading the copies instead makes softprops/action-gh-release fail the whole job
+      # with a 404 while renaming the asset, which leaves the release as an unpublished draft.
       - name: Write the release body
         run: |
           version="${{ needs.check_version.outputs.version }}"

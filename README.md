@@ -1,7 +1,3 @@
-
-> [!IMPORTANT]
-> Remove this line to confirm you've reviewed this PR before submitting.
-
 <p align="center">
   <img
     src="assets/images/aaykra_icon.png"
@@ -17,7 +13,7 @@ AAYKRA is a fast, native code editor built in Rust with a GPU-accelerated
 renderer. It pairs the speed of a native application with the familiarity of a
 modern IDE, and stays out of your way.
 
-Previously known as **Aaykra**.
+Previously known as **Aayushi**.
 
 ## Features
 
