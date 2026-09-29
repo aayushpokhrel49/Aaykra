@@ -5,6 +5,8 @@ bullet under Unreleased with your change; the version bump commit turns that
 section into the release, and the release workflow copies it into the GitHub
 release body.
 
+## Unreleased
+
 ## 1.0.80 - 2026-09-29
 
 - The menus are now shown in the title bar by default. Set `"title_bar": { "show_menus": false }` in your settings to go back to the single-row title bar. macOS still uses its native system menu bar.
