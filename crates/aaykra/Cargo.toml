@@ -2,7 +2,7 @@
 description = "The fast, native VSCode alternative."
 edition.workspace = true
 name = "aaykra"
-version = "1.0.70"
+version = "1.0.80"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 repository = "https://github.com/aayushpokhrel49/Aaykra"
@@ -165,6 +165,7 @@ svg_preview.workspace = true
 sysinfo.workspace = true
 tab_switcher.workspace = true
 tasks_ui.workspace = true
+terminal.workspace = true
 terminal_view.workspace = true
 theme.workspace = true
 theme_extension.workspace = true

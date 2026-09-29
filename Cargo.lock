@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aaykra"
-version = "1.0.70"
+version = "1.0.80"
 dependencies = [
  "aaykra_actions",
  "aaykra_env_vars",
@@ -113,6 +113,7 @@ dependencies = [
  "tabular_data_preview",
  "tasks_ui",
  "tempfile",
+ "terminal",
  "terminal_view",
  "theme",
  "theme_extension",

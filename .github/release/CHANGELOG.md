@@ -5,6 +5,13 @@ bullet under Unreleased with your change; the version bump commit turns that
 section into the release, and the release workflow copies it into the GitHub
 release body.
 
+## 1.0.80 - 2026-09-29
+
+- The menus are now shown in the title bar by default. Set `"title_bar": { "show_menus": false }` in your settings to go back to the single-row title bar. macOS still uses its native system menu bar.
+- Added a Terminal menu to the application menu bar, with New (regular, centered, and local), Show and Focus Terminal Panel, Tasks (Run Task, Rerun Last Task, Configure Tasks, Open Global Tasks File), Rename Terminal, and the standard clipboard actions.
+- Submenus nested more than one level deep in a context menu are now expanded recursively instead of being dropped, so a context menu built from a nested menu keeps all of its entries.
+- Fixed automatic updates on Linux package installs (.deb and .pkg.tar.zst) never sticking: the update is staged under `~/.local` because `/opt/aaykra` is root-owned, and the CLI symlinks, desktop entry, and icons are now repointed at that copy. Previously every launch kept starting the old build and asking to restart again.
+
 ## 1.0.70 - 2026-09-27
 
 - Renamed the editor to AAYKRA throughout: the crate, the `aaykra` binary and CLI, the `aaykra://` URL scheme, the data directories, the app menus, the About window, and every release artifact. Installs that predate the rename keep using their existing `Aayushi Code` directories, and the pre-rename `aayushicode://` links and CLI handshake still work.

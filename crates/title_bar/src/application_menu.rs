@@ -80,7 +80,8 @@ impl ApplicationMenu {
                         last_was_separator = true;
                     }
                 }
-                OwnedMenuItem::Submenu(submenu) => {
+                OwnedMenuItem::Submenu(mut submenu) => {
+                    submenu.items = Self::sanitize_menu_items(submenu.items);
                     // Skip empty submenus
                     if !submenu.items.is_empty() {
                         cleaned.push(OwnedMenuItem::Submenu(submenu));
@@ -112,43 +113,29 @@ impl ApplicationMenu {
             let menu = menu.when_some(window.focused(cx), |menu, focused| menu.context(focused));
             let sanitized_items = Self::sanitize_menu_items(entry.menu.items);
 
-            sanitized_items
-                .into_iter()
-                .fold(menu, |menu, item| match item {
-                    OwnedMenuItem::Separator => menu.separator(),
-                    OwnedMenuItem::Action {
-                        name,
-                        action,
-                        checked,
-                        disabled,
-                        ..
-                    } => menu.action_checked_with_disabled(name, action, checked, disabled),
-                    OwnedMenuItem::Submenu(submenu) => {
-                        submenu
-                            .items
-                            .into_iter()
-                            .fold(menu, |menu, item| match item {
-                                OwnedMenuItem::Separator => menu.separator(),
-                                OwnedMenuItem::Action {
-                                    name,
-                                    action,
-                                    checked,
-                                    disabled,
-                                    ..
-                                } => menu
-                                    .action_checked_with_disabled(name, action, checked, disabled),
-                                OwnedMenuItem::Submenu(_) => menu,
-                                OwnedMenuItem::SystemMenu(_) => {
-                                    // A system menu doesn't make sense in this context, so ignore it
-                                    menu
-                                }
-                            })
-                    }
-                    OwnedMenuItem::SystemMenu(_) => {
-                        // A system menu doesn't make sense in this context, so ignore it
-                        menu
-                    }
+            Self::extend_context_menu(menu, sanitized_items)
+        })
+    }
+
+    fn extend_context_menu(menu: ContextMenu, items: Vec<OwnedMenuItem>) -> ContextMenu {
+        items.into_iter().fold(menu, |menu, item| match item {
+            OwnedMenuItem::Separator => menu.separator(),
+            OwnedMenuItem::Action {
+                name,
+                action,
+                checked,
+                disabled,
+                ..
+            } => menu.action_checked_with_disabled(name, action, checked, disabled),
+            OwnedMenuItem::Submenu(submenu) => {
+                let name = submenu.name.clone();
+                let items = submenu.items;
+                menu.submenu(name, move |menu, _window, _cx| {
+                    Self::extend_context_menu(menu, items.clone())
                 })
+            }
+            // A system menu doesn't make sense in this context, so ignore it
+            OwnedMenuItem::SystemMenu(_) => menu,
         })
     }
 

@@ -450,9 +450,7 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
             let mut current_version = auto_updater.current_version.clone();
             current_version.pre = semver::Prerelease::EMPTY;
             current_version.build = semver::BuildMetadata::EMPTY;
-            format!(
-                "https://github.com/aayushpokhrel49/Aaykra/releases/tag/v{current_version}"
-            )
+            format!("https://github.com/aayushpokhrel49/Aaykra/releases/tag/v{current_version}")
         }
         ReleaseChannel::Dev => {
             "https://github.com/aayushpokhrel49/Aaykra/commits/main/".to_string()
@@ -1409,6 +1407,7 @@ async fn install_release_linux(
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");
+    let mut installed_as_per_user_copy = true;
 
     let expected_suffix = format!("{}/libexec/aaykra-editor", app_folder_name);
 
@@ -1417,6 +1416,7 @@ async fn install_release_linux(
         .and_then(|str| str.strip_suffix(&expected_suffix))
     {
         to = PathBuf::from(prefix);
+        installed_as_per_user_copy = false;
     }
 
     let mut cmd = new_command("rsync");
@@ -1434,7 +1434,191 @@ async fn install_release_linux(
         String::from_utf8_lossy(&output.stderr)
     );
 
+    if installed_as_per_user_copy {
+        install_per_user_launchers(&home_dir, &app_folder_name, channel).await?;
+    }
+
     Ok(Some(to.join(expected_suffix)))
+}
+
+/// Points the user's launchers at the per-user copy under `~/.local` that
+/// [`install_release_linux`] just wrote.
+///
+/// A package-managed install (`.deb`/`.pkg.tar.zst`) runs from a root-owned
+/// `/opt/aaykra` that the updater cannot write to, so the update is staged in
+/// `~/.local` instead. Without repointing the launchers, `/usr/bin/aaykra` and
+/// the system desktop entry keep starting `/opt/aaykra`, so every fresh launch
+/// runs the old build, rediscovers the newer release, and asks to restart
+/// again, forever. Repointing them makes `~/.local` the copy that is actually
+/// launched, after which updates are applied in place.
+#[cfg(target_os = "linux")]
+async fn install_per_user_launchers(
+    home_dir: &Path,
+    app_folder_name: &str,
+    channel: &str,
+) -> Result<()> {
+    let app_id = match channel {
+        "stable" => "me.aayush.Aaykra",
+        "dev" => "me.aayush.Aaykra-Dev",
+        unsupported_channel => anyhow::bail!("unknown release channel: {unsupported_channel}"),
+    };
+
+    let app_dir = home_dir.join(".local").join(app_folder_name);
+    let cli = app_dir.join("bin").join("aaykra");
+    anyhow::ensure!(
+        cli.is_file(),
+        "expected the update to contain a CLI at {}",
+        cli.display()
+    );
+
+    let bin_dir = home_dir.join(".local").join("bin");
+    fs::create_dir_all(&bin_dir)
+        .await
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+
+    let cli_on_path = bin_dir.join("aaykra");
+    replace_symlink(&cli, &cli_on_path)
+        .await
+        .with_context(|| format!("failed to link {}", cli_on_path.display()))?;
+
+    // The package layouts expose the CLI under this name as well; the tar.gz
+    // layout only ships `aaykra`, but a symlink costs nothing either way.
+    let cli_alias = bin_dir.join("aaykra-cli");
+    replace_symlink(&cli, &cli_alias)
+        .await
+        .with_context(|| format!("failed to link {}", cli_alias.display()))?;
+
+    // XDG searches `~/.local/share/applications` before `/usr/share/applications`,
+    // so a user-level entry with the same app id shadows the package manager's
+    // and the app launcher starts the updated copy.
+    let bundled_desktop_entry = app_dir
+        .join("share")
+        .join("applications")
+        .join(format!("{app_id}.desktop"));
+
+    let desktop_entry = fs::read_to_string(&bundled_desktop_entry)
+        .await
+        .with_context(|| format!("failed to read {}", bundled_desktop_entry.display()))?;
+
+    // Desktop entry values are quoted strings, so a home directory containing a
+    // space still yields a single value. `TryExec` is repointed too: it decides
+    // whether a launcher shows the app as available, and the bare `aaykra` name
+    // is not resolvable from the desktop environment's `PATH`.
+    //
+    // `Icon` is left as the bundled icon name: the spec does not allow quoting
+    // it, so a path containing a space cannot be expressed. The icons are
+    // installed into the user's icon theme below instead, which is how a
+    // tar.gz install resolves that name.
+    let desktop_entry = desktop_entry
+        .lines()
+        .map(|line| {
+            let repointed = ["Exec=", "TryExec="].into_iter().find_map(|prefix| {
+                line.strip_prefix(prefix)
+                    .and_then(|arguments| arguments.strip_prefix("aaykra"))
+                    .map(|arguments| format!("{prefix}\"{}\"{}", cli_on_path.display(), arguments))
+            });
+            repointed.unwrap_or_else(|| line.to_owned())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let applications_dir = home_dir.join(".local").join("share").join("applications");
+    fs::create_dir_all(&applications_dir)
+        .await
+        .with_context(|| format!("failed to create {}", applications_dir.display()))?;
+
+    let desktop_entry_path = applications_dir.join(format!("{app_id}.desktop"));
+    fs::write(&desktop_entry_path, desktop_entry.as_bytes())
+        .await
+        .with_context(|| format!("failed to write {}", desktop_entry_path.display()))?;
+
+    install_user_icons(home_dir, &app_dir, app_id).await?;
+
+    log::info!(
+        "Auto Update: installed the update to {app_dir:?} and pointed {} and {} at it",
+        cli_on_path.display(),
+        desktop_entry_path.display()
+    );
+
+    Ok(())
+}
+
+/// Installs the bundled icons into the user's icon theme, mirroring
+/// `script/install.sh`, so the per-user copy is self-sufficient even when no
+/// package manager installed the app system-wide.
+#[cfg(target_os = "linux")]
+async fn install_user_icons(home_dir: &Path, app_dir: &Path, app_id: &str) -> Result<()> {
+    let bundled_icons = app_dir.join("share").join("icons").join("hicolor");
+    let user_icons = home_dir
+        .join(".local")
+        .join("share")
+        .join("icons")
+        .join("hicolor");
+
+    for size in ["512x512", "1024x1024"] {
+        let source_dir = bundled_icons.join(size).join("apps");
+        let target_dir = user_icons.join(size).join("apps");
+        fs::create_dir_all(&target_dir)
+            .await
+            .with_context(|| format!("failed to create {}", target_dir.display()))?;
+
+        // The app-id-named copy is what Wayland compositors look up by the
+        // window's app id, so it is installed under that name as well.
+        for name in ["aaykra.png", &format!("{app_id}.png")] {
+            let source = source_dir.join(name);
+            anyhow::ensure!(
+                source.is_file(),
+                "expected the update to contain an icon at {}",
+                source.display()
+            );
+            fs::copy(&source, target_dir.join(name))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to copy {} to {}",
+                        source.display(),
+                        target_dir.join(name).display()
+                    )
+                })?;
+        }
+    }
+
+    // Only a cache: a failure here leaves the icons to be picked up lazily, and
+    // not having the tool installed is the common case.
+    if which::which("gtk-update-icon-cache").is_ok()
+        && let Ok(output) = new_command("gtk-update-icon-cache")
+            .arg("-f")
+            .arg("-t")
+            .arg(&user_icons)
+            .output()
+            .await
+        && !output.status.success()
+    {
+        log::warn!(
+            "Auto Update: gtk-update-icon-cache failed for {}: {}",
+            user_icons.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
+/// Points `link` at `target`, replacing whatever `link` referred to before.
+///
+/// `symlink` fails when the destination already exists, which is the common
+/// case here: a previous update already created the link, or the package
+/// manager shipped a real file under the same name.
+#[cfg(target_os = "linux")]
+async fn replace_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(link).await {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(link).await?,
+        Ok(_) => fs::remove_file(link).await?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    smol::fs::unix::symlink(target, link).await
 }
 
 async fn install_release_macos(
@@ -1660,10 +1844,7 @@ mod tests {
     fn test_github_asset_names_include_legacy_names() {
         assert_eq!(
             github_asset_names("zed", "linux", "x86_64").unwrap(),
-            [
-                "aaykra-linux-x86_64.tar.gz",
-                "aaykra-linux-x86_64.tar.gz",
-            ]
+            ["aaykra-linux-x86_64.tar.gz", "aaykra-linux-x86_64.tar.gz",]
         );
         assert_eq!(
             github_asset_names("zed", "macos", "aarch64").unwrap(),
@@ -2039,5 +2220,122 @@ mod tests {
         );
 
         assert_eq!(newer_version.unwrap(), Some(fetched_version));
+    }
+
+    /// A package-managed install runs from a root-owned `/opt/aaykra`, so the
+    /// update lands in `~/.local`. The launchers must follow it there, or every
+    /// launch restarts the old build and the update loop never ends.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    async fn test_install_per_user_launchers_repoints_launchers(cx: &mut TestAppContext) {
+        cx.background_executor.allow_parking();
+
+        const APP_ID: &str = "me.aayush.Aaykra";
+
+        let home = tempdir().unwrap();
+        let app_dir = home.path().join(".local").join("aaykra.app");
+
+        let bundled_desktop_entry = format!(
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=AAYKRA\n\
+             TryExec=aaykra\n\
+             Exec=aaykra %U\n\
+             Icon=aaykra\n\
+             Actions=NewWorkspace;\n\
+             \n\
+             [Desktop Action NewWorkspace]\n\
+             Exec=aaykra --new %U\n\
+             Name=Open a new workspace\n"
+        );
+
+        let mut write_bundle_file = |path: PathBuf, contents: &[u8]| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, contents).unwrap();
+        };
+        write_bundle_file(app_dir.join("bin").join("aaykra"), b"cli");
+        write_bundle_file(app_dir.join("libexec").join("aaykra-editor"), b"editor");
+        write_bundle_file(
+            app_dir
+                .join("share")
+                .join("applications")
+                .join(format!("{APP_ID}.desktop")),
+            bundled_desktop_entry.as_bytes(),
+        );
+        for size in ["512x512", "1024x1024"] {
+            for name in ["aaykra.png", &format!("{APP_ID}.png")] {
+                write_bundle_file(
+                    app_dir
+                        .join("share")
+                        .join("icons")
+                        .join("hicolor")
+                        .join(size)
+                        .join("apps")
+                        .join(name),
+                    b"icon",
+                );
+            }
+        }
+
+        // A previous update may already have left a link behind, and the package
+        // manager may have shipped a real binary under the same name.
+        let cli_on_path = home.path().join(".local").join("bin").join("aaykra");
+        std::fs::create_dir_all(cli_on_path.parent().unwrap()).unwrap();
+        std::fs::write(&cli_on_path, b"stale").unwrap();
+
+        install_per_user_launchers(home.path(), "aaykra.app", "stable")
+            .await
+            .unwrap();
+
+        let cli = app_dir.join("bin").join("aaykra");
+        for link in [
+            cli_on_path.clone(),
+            home.path().join(".local/bin/aaykra-cli"),
+        ] {
+            assert_eq!(std::fs::read_link(&link).unwrap(), cli);
+        }
+
+        let desktop_entry = std::fs::read_to_string(
+            home.path()
+                .join(".local")
+                .join("share")
+                .join("applications")
+                .join(format!("{APP_ID}.desktop")),
+        )
+        .unwrap();
+        let exec = format!("\"{}\"", cli_on_path.display());
+        assert!(desktop_entry.contains(&format!("Exec={exec} %U\n")));
+        assert!(desktop_entry.contains(&format!("Exec={exec} --new %U\n")));
+        assert!(desktop_entry.contains(&format!("TryExec={exec}\n")));
+        // Quoting keeps a home directory containing a space a single value.
+        assert!(!desktop_entry.contains("Exec=aaykra"));
+
+        for size in ["512x512", "1024x1024"] {
+            for name in ["aaykra.png", &format!("{APP_ID}.png")] {
+                let icon = home
+                    .path()
+                    .join(".local")
+                    .join("share")
+                    .join("icons")
+                    .join("hicolor")
+                    .join(size)
+                    .join("apps")
+                    .join(name);
+                assert_eq!(std::fs::read(icon).unwrap(), b"icon");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    async fn test_install_per_user_launchers_rejects_unknown_channel(_cx: &mut TestAppContext) {
+        let home = tempdir().unwrap();
+        let error = install_per_user_launchers(home.path(), "aaykra.app", "nightly")
+            .await
+            .expect_err("expected an unknown channel to be rejected");
+        assert!(
+            error.to_string().contains("unknown release channel"),
+            "unexpected error: {error:?}"
+        );
     }
 }

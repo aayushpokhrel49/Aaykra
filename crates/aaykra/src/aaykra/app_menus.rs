@@ -1,7 +1,7 @@
+use aaykra_actions::{Quit, debug_panel, dev, git_panel, project_panel};
 use gpui::{App, Menu, MenuItem, OsAction};
 use release_channel::ReleaseChannel;
 use terminal_view::terminal_panel;
-use aaykra_actions::{Quit, debug_panel, dev, git_panel, project_panel};
 
 pub fn app_menus(cx: &mut App) -> Vec<Menu> {
     let mut view_items = vec![
@@ -72,7 +72,10 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                     MenuItem::separator(),
                     MenuItem::action("Open Keymap", aaykra_actions::OpenKeymap),
                     MenuItem::action("Open Keymap File", aaykra_actions::OpenKeymapFile),
-                    MenuItem::action("Open Default Key Bindings", aaykra_actions::OpenDefaultKeymap),
+                    MenuItem::action(
+                        "Open Default Key Bindings",
+                        aaykra_actions::OpenDefaultKeymap,
+                    ),
                     MenuItem::separator(),
                     MenuItem::action(
                         "Select Theme...",
@@ -219,7 +222,10 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Back", workspace::GoBack),
                 MenuItem::action("Forward", workspace::GoForward),
                 MenuItem::separator(),
-                MenuItem::action("Command Palette...", aaykra_actions::command_palette::Toggle),
+                MenuItem::action(
+                    "Command Palette...",
+                    aaykra_actions::command_palette::Toggle,
+                ),
                 MenuItem::separator(),
                 MenuItem::action("Go to File...", workspace::ToggleFileFinder::default()),
                 // MenuItem::action("Go to Symbol in Project", project_symbols::Toggle),
@@ -278,6 +284,40 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Toggle Breakpoint", editor::actions::ToggleBreakpoint),
                 MenuItem::action("Edit Breakpoint", editor::actions::EditLogBreakpoint),
                 MenuItem::action("Clear All Breakpoints", debugger_ui::ClearAllBreakpoints),
+            ],
+        },
+        Menu {
+            name: "Terminal".into(),
+            disabled: false,
+            items: vec![
+                MenuItem::submenu(Menu::new("New").items([
+                    MenuItem::action("Terminal", workspace::NewTerminal::default()),
+                    MenuItem::action("Center Terminal", workspace::NewCenterTerminal::default()),
+                    MenuItem::action("Local Terminal", workspace::NewTerminal { local: true }),
+                ])),
+                MenuItem::separator(),
+                MenuItem::action("Show Terminal Panel", terminal_panel::Toggle),
+                MenuItem::action("Focus Terminal Panel", terminal_panel::ToggleFocus),
+                MenuItem::separator(),
+                MenuItem::submenu(Menu::new("Tasks").items([
+                    MenuItem::action(
+                        "Run Task…",
+                        aaykra_actions::Spawn::ViaModal {
+                            reveal_target: None,
+                        },
+                    ),
+                    MenuItem::action("Rerun Last Task", terminal_view::RerunTask),
+                    MenuItem::separator(),
+                    MenuItem::action("Configure Tasks…", aaykra_actions::OpenProjectTasks),
+                    MenuItem::action("Open Global Tasks File", super::OpenTasks),
+                ])),
+                MenuItem::separator(),
+                MenuItem::action("Rename Terminal", terminal_view::RenameTerminal),
+                MenuItem::separator(),
+                MenuItem::action("Clear", terminal::Clear),
+                MenuItem::action("Copy", terminal::Copy),
+                MenuItem::action("Paste", terminal::Paste),
+                MenuItem::action("Select All", terminal::SelectAll),
             ],
         },
         Menu {

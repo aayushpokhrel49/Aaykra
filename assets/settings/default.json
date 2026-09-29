@@ -551,7 +551,7 @@
     // Whether to show onboarding banners in the titlebar.
     "show_onboarding_banner": true,
     // Whether to show the menus in the titlebar.
-    "show_menus": false,
+    "show_menus": true,
     // The layout of window control buttons in the title bar (Linux only).
     "button_layout": "platform_default",
   },
