@@ -1454,7 +1454,7 @@ async fn install_release_linux(
 /// runs the old build, rediscovers the newer release, and asks to restart
 /// again, forever. Repointing them makes `~/.local` the copy that is actually
 /// launched, after which updates are applied in place.
-#[cfg(any())]
+#[cfg(target_os = "linux")]
 async fn install_per_user_launchers(
     home_dir: &Path,
     app_folder_name: &str,
@@ -1549,7 +1549,7 @@ async fn install_per_user_launchers(
 /// Installs the bundled icons into the user's icon theme, mirroring
 /// `script/install.sh`, so the per-user copy is self-sufficient even when no
 /// package manager installed the app system-wide.
-#[cfg(any())]
+#[cfg(target_os = "linux")]
 async fn install_user_icons(home_dir: &Path, app_dir: &Path, app_id: &str) -> Result<()> {
     let bundled_icons = app_dir.join("share").join("icons").join("hicolor");
     let user_icons = home_dir
@@ -1612,7 +1612,7 @@ async fn install_user_icons(home_dir: &Path, app_dir: &Path, app_id: &str) -> Re
 /// `symlink` fails when the destination already exists, which is the common
 /// case here: a previous update already created the link, or the package
 /// manager shipped a real file under the same name.
-#[cfg(any())]
+#[cfg(target_os = "linux")]
 async fn replace_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     match fs::symlink_metadata(link).await {
         Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(link).await?,
@@ -2252,7 +2252,7 @@ mod tests {
              Name=Open a new workspace\n"
         );
 
-        let mut write_bundle_file = |path: PathBuf, contents: &[u8]| {
+        let write_bundle_file = |path: PathBuf, contents: &[u8]| {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, contents).unwrap();
         };
