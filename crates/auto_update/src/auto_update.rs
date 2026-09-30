@@ -1407,16 +1407,15 @@ async fn install_release_linux(
 
     let from = extracted.join(&app_folder_name);
     let mut to = home_dir.join(".local");
-    let mut installed_as_per_user_copy = true;
 
     let expected_suffix = format!("{}/libexec/aaykra-editor", app_folder_name);
 
-    if let Some(prefix) = running_app_path
+    let running_app_prefix = running_app_path
         .to_str()
-        .and_then(|str| str.strip_suffix(&expected_suffix))
-    {
+        .and_then(|str| str.strip_suffix(&expected_suffix));
+
+    if let Some(prefix) = running_app_prefix {
         to = PathBuf::from(prefix);
-        installed_as_per_user_copy = false;
     }
 
     let mut cmd = new_command("rsync");
@@ -1434,7 +1433,11 @@ async fn install_release_linux(
         String::from_utf8_lossy(&output.stderr)
     );
 
-    if installed_as_per_user_copy {
+    // Only Linux has launchers that can point somewhere other than the
+    // directory the update was just written to, so the per-user repointing
+    // step does not exist on the other platforms.
+    #[cfg(target_os = "linux")]
+    if running_app_prefix.is_none() {
         install_per_user_launchers(&home_dir, &app_folder_name, channel).await?;
     }
 
@@ -1451,7 +1454,7 @@ async fn install_release_linux(
 /// runs the old build, rediscovers the newer release, and asks to restart
 /// again, forever. Repointing them makes `~/.local` the copy that is actually
 /// launched, after which updates are applied in place.
-#[cfg(target_os = "linux")]
+#[cfg(any())]
 async fn install_per_user_launchers(
     home_dir: &Path,
     app_folder_name: &str,
@@ -1546,7 +1549,7 @@ async fn install_per_user_launchers(
 /// Installs the bundled icons into the user's icon theme, mirroring
 /// `script/install.sh`, so the per-user copy is self-sufficient even when no
 /// package manager installed the app system-wide.
-#[cfg(target_os = "linux")]
+#[cfg(any())]
 async fn install_user_icons(home_dir: &Path, app_dir: &Path, app_id: &str) -> Result<()> {
     let bundled_icons = app_dir.join("share").join("icons").join("hicolor");
     let user_icons = home_dir
@@ -1609,7 +1612,7 @@ async fn install_user_icons(home_dir: &Path, app_dir: &Path, app_id: &str) -> Re
 /// `symlink` fails when the destination already exists, which is the common
 /// case here: a previous update already created the link, or the package
 /// manager shipped a real file under the same name.
-#[cfg(target_os = "linux")]
+#[cfg(any())]
 async fn replace_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     match fs::symlink_metadata(link).await {
         Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(link).await?,
