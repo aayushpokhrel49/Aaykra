@@ -493,6 +493,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::SaturatingBool>(render_toggle_button)
         .add_basic_renderer::<settings::CursorShape>(render_dropdown)
         .add_basic_renderer::<settings::RestoreOnStartupBehavior>(render_dropdown)
+        .add_basic_renderer::<settings::OnNewWindow>(render_dropdown)
         .add_basic_renderer::<settings::BottomDockLayout>(render_dropdown)
         .add_basic_renderer::<settings::OnLastWindowClosed>(render_dropdown)
         .add_basic_renderer::<settings::CliDefaultOpenBehavior>(render_dropdown)
@@ -584,6 +585,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::IconThemeName>(render_icon_theme_picker)
         .add_basic_renderer::<settings::BufferLineHeightDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::GitGutterWidthDiscriminants>(render_dropdown)
+        .add_basic_renderer::<settings::ProjectPanelTitleTooltipDelayDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::AutosaveSettingDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::WorkingDirectoryDiscriminants>(render_dropdown)
         .add_basic_renderer::<settings::IncludeIgnoredContent>(render_dropdown)
@@ -4279,6 +4281,25 @@ fn update_settings_file(
     cx: &mut App,
     update: impl 'static + Send + FnOnce(&mut SettingsContent, &App),
 ) -> Result<()> {
+<<<<<<< be361342f7ea5131d36901d2d6a8bb5306c2cf4e
+=======
+    let mut update = Some(update);
+    update_settings_file_inner(file, file_name, window, cx, &mut || {
+        Box::new(update.take().expect("called once"))
+    })
+}
+
+#[inline(never)]
+fn update_settings_file_inner(
+    file: SettingsUiFile,
+    file_name: Option<&'static str>,
+    window: &mut Window,
+    cx: &mut App,
+    update: &mut dyn FnMut() -> Box<dyn Send + FnOnce(&mut SettingsContent, &App)>,
+) -> Result<()> {
+    telemetry::event!("Settings Change", setting = file_name, type = file.setting_type());
+
+>>>>>>> b189243aee365d311f6b70c3b00b4910e3e6aab9
     match file {
         SettingsUiFile::Project((worktree_id, rel_path)) => {
             let rel_path = project_settings_file_path(worktree_id, &rel_path, cx);
@@ -4290,7 +4311,7 @@ fn update_settings_file(
         }
         SettingsUiFile::User => {
             // todo(settings_ui) error?
-            SettingsStore::global(cx).update_settings_file(<dyn fs::Fs>::global(cx), update);
+            SettingsStore::global(cx).update_settings_file(<dyn fs::Fs>::global(cx), update());
             Ok(())
         }
         SettingsUiFile::Server(_) => unimplemented!(),
@@ -4415,6 +4436,7 @@ impl ProjectSettingsUpdateQueue {
     }
 }
 
+<<<<<<< be361342f7ea5131d36901d2d6a8bb5306c2cf4e
 /// Uses `.aaykra/settings.json`, falling back to an existing `.aayushicode/settings.json`.
 fn project_settings_file_path(
     worktree_id: WorktreeId,
@@ -4443,10 +4465,13 @@ fn project_settings_file_path(
     .into()
 }
 
+=======
+#[inline(never)]
+>>>>>>> b189243aee365d311f6b70c3b00b4910e3e6aab9
 fn update_project_setting_file(
     worktree_id: WorktreeId,
     rel_path: Arc<RelPath>,
-    update: impl 'static + FnOnce(&mut SettingsContent, &App),
+    update: &mut dyn FnMut() -> Box<dyn Send + FnOnce(&mut SettingsContent, &App)>,
     settings_window: Entity<SettingsWindow>,
     cx: &mut App,
 ) -> Result<()> {
@@ -4467,7 +4492,7 @@ fn update_project_setting_file(
         settings_window: settings_window.downgrade(),
         project: project.downgrade(),
         worktree: worktree.downgrade(),
-        update: Box::new(update),
+        update: update(),
     };
 
     ProjectSettingsUpdateQueue::enqueue(cx, entry);
