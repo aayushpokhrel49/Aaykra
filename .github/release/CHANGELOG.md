@@ -7,6 +7,8 @@ release body.
 
 ## Unreleased
 
+## 1.0.90 - 2026-10-01
+
 - Fixed automatic updates on root-owned Linux installs (.deb and .pkg.tar.zst) repointing the CLI symlinks, desktop entry, and icons at the per-user copy under `~/.local`. The repointing code was compiled out in v1.0.80, so the old build kept being launched and every start asked to restart again; the new build is now the one that runs.
 
 ## 1.0.80 - 2026-09-29
