@@ -7009,7 +7009,7 @@ impl Editor {
     }
 
     fn convert_text_case(text: &str, case: Case) -> String {
-        text.lines()
+        text.split('\n')
             .map(|line| {
                 let trimmed_start = line.trim_start();
                 let leading = &line[..line.len() - trimmed_start.len()];
@@ -8989,19 +8989,22 @@ impl Editor {
         self.highlighted_rows
             .values()
             .flat_map(|highlighted_rows| {
-                let start_index = highlighted_rows.partition_point(|highlight| {
-                    highlight
-                        .range
-                        .end
-                        .cmp(&anchor_range.start, buffer_snapshot)
-                        .is_lt()
-                });
                 let end_index = highlighted_rows.partition_point(|highlight| {
                     highlight
                         .range
                         .start
                         .cmp(&anchor_range.end, buffer_snapshot)
                         .is_le()
+                });
+                // Search within `..end_index` so a highlight whose anchors
+                // have drifted to `start > end` can't produce an inverted
+                // slice; the filter below drops it either way.
+                let start_index = highlighted_rows[..end_index].partition_point(|highlight| {
+                    highlight
+                        .range
+                        .end
+                        .cmp(&anchor_range.start, buffer_snapshot)
+                        .is_lt()
                 });
                 highlighted_rows[start_index..end_index]
                     .iter()

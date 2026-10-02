@@ -996,7 +996,13 @@ impl Markdown {
             let mut fallback_code_block_language = None;
             if let Some(registry) = language_registry.as_ref() {
                 for name in language_names {
-                    if let Ok(language) = registry.language_for_name_or_extension(&name).await {
+                    let mut language = registry.language_for_name_or_extension(&name).await;
+                    if language.is_err()
+                        && let Some((first_word, _)) = name.split_once(char::is_whitespace)
+                    {
+                        language = registry.language_for_name_or_extension(first_word).await;
+                    }
+                    if let Ok(language) = language {
                         languages_by_name.insert(name, language);
                     }
                 }
@@ -1601,8 +1607,14 @@ impl MarkdownElement {
         };
 
         let mut heading_style = self.style.heading.clone();
-        let heading_text_style = heading_style.text_style().clone();
+        let mut heading_text_style = heading_style.text_style().clone();
         heading.style().refine(&heading_style);
+
+        if let Some(level_style) =
+            heading_level_style(level, self.style.heading_level_styles.as_ref())
+        {
+            heading_text_style.refine(level_style);
+        }
 
         builder.push_text_style(TextStyleRefinement {
             text_align: Some(align),
@@ -2535,6 +2547,7 @@ impl Element for MarkdownElement {
                             builder.table.start_row();
                         }
                         MarkdownTag::TableCell => {
+                            builder.table.start_cell();
                             let is_header = builder.table.in_head;
                             let row_index = builder.table.row_index;
                             let col_index = builder.table.col_index;
@@ -2952,22 +2965,26 @@ fn apply_heading_style(
         };
     }
 
-    if let Some(styles) = custom_styles {
-        let style_opt = match level {
-            pulldown_cmark::HeadingLevel::H1 => &styles.h1,
-            pulldown_cmark::HeadingLevel::H2 => &styles.h2,
-            pulldown_cmark::HeadingLevel::H3 => &styles.h3,
-            pulldown_cmark::HeadingLevel::H4 => &styles.h4,
-            pulldown_cmark::HeadingLevel::H5 => &styles.h5,
-            pulldown_cmark::HeadingLevel::H6 => &styles.h6,
-        };
-
-        if let Some(style) = style_opt {
-            heading.style().text = style.clone();
-        }
+    if let Some(style) = heading_level_style(level, custom_styles) {
+        heading.style().text = style.clone();
     }
 
     heading
+}
+
+fn heading_level_style(
+    level: pulldown_cmark::HeadingLevel,
+    custom_styles: Option<&HeadingLevelStyles>,
+) -> Option<&TextStyleRefinement> {
+    let styles = custom_styles?;
+    match level {
+        pulldown_cmark::HeadingLevel::H1 => styles.h1.as_ref(),
+        pulldown_cmark::HeadingLevel::H2 => styles.h2.as_ref(),
+        pulldown_cmark::HeadingLevel::H3 => styles.h3.as_ref(),
+        pulldown_cmark::HeadingLevel::H4 => styles.h4.as_ref(),
+        pulldown_cmark::HeadingLevel::H5 => styles.h5.as_ref(),
+        pulldown_cmark::HeadingLevel::H6 => styles.h6.as_ref(),
+    }
 }
 
 fn render_wrap_code_block_button(
@@ -3092,6 +3109,7 @@ impl ParentElement for AnyDiv {
 struct TableState {
     alignments: Vec<Alignment>,
     in_head: bool,
+    in_cell: bool,
     row_index: usize,
     col_index: usize,
 }
@@ -3100,6 +3118,7 @@ impl TableState {
     fn start(&mut self, alignments: Vec<Alignment>) {
         self.alignments = alignments;
         self.in_head = false;
+        self.in_cell = false;
         self.row_index = 0;
         self.col_index = 0;
     }
@@ -3107,6 +3126,7 @@ impl TableState {
     fn end(&mut self) {
         self.alignments.clear();
         self.in_head = false;
+        self.in_cell = false;
         self.row_index = 0;
         self.col_index = 0;
     }
@@ -3127,7 +3147,12 @@ impl TableState {
         self.row_index += 1;
     }
 
+    fn start_cell(&mut self) {
+        self.in_cell = true;
+    }
+
     fn end_cell(&mut self) {
+        self.in_cell = false;
         self.col_index += 1;
     }
 
@@ -3391,7 +3416,27 @@ impl MarkdownElementBuilder {
     }
 
     fn push_image_child(&mut self, child: impl IntoElement) {
-        self.modify_current_div(|el| el.flex().flex_row().flex_wrap().items_start());
+        let table_cell_alignment = self
+            .table
+            .in_cell
+            .then(|| self.table.current_cell_alignment());
+        self.modify_current_div(|el| {
+            let el = el.flex().flex_row().flex_wrap();
+            // Table cells center their content vertically and apply column alignment via a
+            // column-direction container. Switching it to a row moves those axes, so the
+            // alignment has to be restated for the row.
+            match table_cell_alignment {
+                Some(alignment) => {
+                    let el = el.items_center().content_center();
+                    match alignment {
+                        Some(Alignment::Center) => el.justify_center(),
+                        Some(Alignment::Right) => el.justify_end(),
+                        _ => el.justify_start(),
+                    }
+                }
+                None => el.items_start(),
+            }
+        });
         self.div_stack.last_mut().unwrap().line_break_mode = LineBreakMode::FlexWrap;
         self.append_child(child.into_any_element());
     }

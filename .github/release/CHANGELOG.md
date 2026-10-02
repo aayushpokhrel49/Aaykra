@@ -8,6 +8,25 @@ release body.
 ## Unreleased
 
 - Added the Aaykra theme, a dark theme that is now the default for new and existing installs. It is bundled with the binary rather than fetched from the extension registry, and the default appearance is pinned to dark instead of following the system, so the app no longer changes theme with the OS. `Catppuccin Latte` is still used when light appearance is requested.
+- Fixed Git commands failing when a branch or ref name also matches a path in the working tree. A branch like \`docs/rewrite\` in a repository that also has a \`docs/rewrite\` directory made git reject the revision as ambiguous, so the Git panel's History tab reported "Failed to load commit history" and commit search returned nothing. Revisions are now terminated with \`--\`, and \`--no-ext-diff\` is passed directly after the subcommand so it is not read as a pathspec.
+- Fixed a diagnostic for a path outside the worktree discarding every other diagnostic in the same batch.
+- Related diagnostics within a group now always link back to the primary diagnostic, instead of only when they are more than five lines away.
+- Fixed merge conflicts with an empty side (no lines between the markers) producing inverted ranges, which could crash row highlighting as soon as text was typed into that side. Empty sides now use the opposite anchor biases so they grow with the text you type.
+- Fixed inlay hints reported outside the buffer (an out-of-range row or a line longer than the buffer) being accepted, and made hint conversion synchronous instead of spawning a task per hint.
+- Fixed case conversion dropping text after a selection that ended at a newline. A selection like "foo\nbar" with the caret at the end of the line no longer leaves "bar" behind.
+- Fixed pending IME input being discarded in read-only buffers, which left a Vim `j`/`k` mapping stuck on its first keystroke.
+- Fixed the deleted marker in the Git diff gutter becoming too narrow on short rows.
+- Fixed code action and completion menu suffix text rendering as faded, unfocused text and covering diagnostic highlights.
+- Fixed custom Markdown heading styles being applied to every heading level instead of only the one they configure. Fenced code blocks with an unknown language now also try the first word of the info string, so \`\`\`\`rust ignore\`\`\`\` highlights as Rust.
+- Fixed images inside Markdown table cells ignoring the column alignment.
+- Fixed data table and tabular row borders extending past the last column, and cells with absolute widths mis-sizing their rows.
+- Fixed the Markdown preview tab tooltip being derived from the preview itself instead of the editor it is showing.
+- The font list no longer includes the internal fallback stack or the placeholder system UI font, which stopped extension font pickers from offering non-installable fonts.
+- Added a keystroke search shortcut to the keymap editor's filter bar (\`Alt-Ctrl-F\` on Linux, \`Cmd-Alt-F\` on macOS).
+- Collapsing a directory in the project panel now keeps the directory selected and scrolls it into view, instead of leaving the selection on a child that no longer exists.
+- Python decorators are highlighted again, including built-in \`@classmethod\`, \`@staticmethod\` and \`@property\`, and \`@\` is no longer treated as a standalone operator so matrix multiplication highlights correctly.
+- The settings JSON editor handles escaped keys in nested objects, so an object key containing a quote can be renamed or removed instead of corrupting the file.
+- PowerShell is now found in Scoop installs that set \`SCOOP\` to a non-default location, and falls back to \`%USERPROFILE%\\scoop\` when it is unset.
 
 ## 1.0.90 - 2026-10-01
 

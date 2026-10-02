@@ -738,7 +738,7 @@ pub enum LogSource {
 
 impl LogSource {
     fn get_args(&self) -> Vec<Cow<'_, str>> {
-        match self {
+        let mut args = match self {
             LogSource::All => vec![
                 Cow::Borrowed("--ignore-missing"), // needed in case of unborn HEAD
                 Cow::Borrowed("--branches"),
@@ -753,7 +753,14 @@ impl LogSource {
                 Cow::Borrowed("--"),
                 Cow::Borrowed(path.as_unix_str()),
             ],
+        };
+        // Without a terminator git cannot tell a branch named `docs/rewrite` from a
+        // `docs/rewrite` directory in the working tree, and refuses the argument as
+        // ambiguous. `Path` states its own separator before the path it passes.
+        if !matches!(self, LogSource::Path(_)) {
+            args.push(Cow::Borrowed("--"));
         }
+        args
     }
 }
 
@@ -1433,6 +1440,9 @@ impl GitRepository for RealGitRepository {
                         "--no-patch",
                         "--format=%H%x00%B%x00%at%x00%ae%x00%an%x00",
                         &commit,
+                        // `commit` reaches here as whatever the user typed, so it can name
+                        // a branch that also names a path in the working tree.
+                        "--",
                     ])
                     .output()
                     .await?;
@@ -1486,6 +1496,7 @@ impl GitRepository for RealGitRepository {
                     "--first-parent",
                 ])
                 .arg(&commit)
+                .arg("--")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1947,6 +1958,7 @@ impl GitRepository for RealGitRepository {
                 "--merge-base",
                 base.as_str(),
                 head.as_str(),
+                "--",
             ]
             .map(OsString::from)
             .to_vec(),
@@ -1958,6 +1970,7 @@ impl GitRepository for RealGitRepository {
                 "--no-renames",
                 "--merge-base",
                 base.as_str(),
+                "--",
             ]
             .map(OsString::from)
             .to_vec(),
@@ -1969,6 +1982,7 @@ impl GitRepository for RealGitRepository {
                 "--no-renames",
                 base.as_str(),
                 head.as_str(),
+                "--",
             ]
             .map(OsString::from)
             .to_vec(),
@@ -2516,7 +2530,7 @@ impl GitRepository for RealGitRepository {
                     }
                     DiffType::HeadToWorktree => git.build_command(&["diff"]).output().await?,
                     DiffType::MergeBase { base_ref } => {
-                        git.build_command(&["diff", "--merge-base", base_ref.as_ref()])
+                        git.build_command(&["diff", "--merge-base", base_ref.as_ref(), "--"])
                             .output()
                             .await?
                     }
@@ -4168,13 +4182,20 @@ impl GitBinary {
             command.args(["-c", "protocol.ext.allow=never"]);
             command.args(["-c", "diff.external="]);
         }
-        command.args(args);
-
         // If the `diff` command is being used, we'll want to add the
         // `--no-ext-diff` flag when working on an untrusted repository,
-        // preventing any external diff programs from being invoked.
-        if !self.is_trusted && args.iter().any(|arg| arg.as_ref() == "diff") {
-            command.arg("--no-ext-diff");
+        // preventing any external diff programs from being invoked. It goes
+        // directly after the subcommand: callers end their revisions with `--`,
+        // and anything after that separator is read as a pathspec rather than as
+        // an option.
+        let mut args = args.iter();
+        if let Some(subcommand) = args.next() {
+            let is_diff = subcommand.as_ref() == "diff";
+            command.arg(subcommand);
+            if !self.is_trusted && is_diff {
+                command.arg("--no-ext-diff");
+            }
+            command.args(args);
         }
 
         if let Some(index_file_path) = self.index_file_path.as_ref() {

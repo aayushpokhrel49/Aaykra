@@ -1533,6 +1533,14 @@ impl Item for MarkdownPreviewView {
             .unwrap_or_else(|| SharedString::from("Markdown Preview"))
     }
 
+    fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
+        self.active_editor
+            .as_ref()?
+            .editor
+            .read(cx)
+            .tab_tooltip_text(cx)
+    }
+
     fn added_to_workspace(
         &mut self,
         workspace: &mut Workspace,

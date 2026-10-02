@@ -8266,15 +8266,11 @@ impl LspStore {
                             None
                         }
                     })
-                    .map(|(server_id, mut new_hints)| {
-                        new_hints.retain(|hint| {
-                            hint.position.is_valid(&buffer_snapshot)
-                                && range.start.is_valid(&buffer_snapshot)
-                                && range.end.is_valid(&buffer_snapshot)
-                                && hint.position.cmp(&range.start, &buffer_snapshot).is_ge()
-                                && hint.position.cmp(&range.end, &buffer_snapshot).is_lt()
-                        });
-                        (server_id, new_hints)
+                    .map(|(server_id, new_hints)| {
+                        (
+                            server_id,
+                            inlay_hints::hints_in_range(new_hints, &range, &buffer_snapshot),
+                        )
                     })
                     .collect::<HashMap<_, _>>();
                 anyhow::ensure!(
@@ -8296,15 +8292,11 @@ impl LspStore {
                 Ok(inlay_hints_task
                     .await
                     .into_iter()
-                    .map(|(server_id, mut new_hints)| {
-                        new_hints.retain(|hint| {
-                            hint.position.is_valid(&buffer_snapshot)
-                                && range.start.is_valid(&buffer_snapshot)
-                                && range.end.is_valid(&buffer_snapshot)
-                                && hint.position.cmp(&range.start, &buffer_snapshot).is_ge()
-                                && hint.position.cmp(&range.end, &buffer_snapshot).is_lt()
-                        });
-                        (server_id, new_hints)
+                    .map(|(server_id, new_hints)| {
+                        (
+                            server_id,
+                            inlay_hints::hints_in_range(new_hints, &range, &buffer_snapshot),
+                        )
                     })
                     .collect())
             })
@@ -9356,7 +9348,7 @@ impl LspStore {
                 self.worktree_store.read(cx).find_worktree(abs_path, cx)
             else {
                 log::warn!("skipping diagnostics update, no worktree found for path {abs_path:?}");
-                return Ok(());
+                continue;
             };
 
             let worktree_id = worktree.read(cx).id();
