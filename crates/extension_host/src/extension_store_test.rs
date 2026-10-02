@@ -550,6 +550,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
         assert_eq!(
             theme_registry.list_names(),
             [
+                "Aaykra",
                 "Catppuccin Mocha",
                 "Monokai Dark",
                 "Monokai Light",
@@ -643,6 +644,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
         assert_eq!(
             theme_registry.list_names(),
             [
+                "Aaykra",
                 "Catppuccin Mocha",
                 "Gruvbox",
                 "Monokai Dark",
@@ -707,6 +709,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
         assert_eq!(
             theme_registry.list_names(),
             [
+                "Aaykra",
                 "Catppuccin Mocha",
                 "Gruvbox",
                 "Monokai Dark",

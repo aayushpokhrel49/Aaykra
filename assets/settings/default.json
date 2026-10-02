@@ -7,12 +7,12 @@
   // - "light": Use the theme indicated by the "light" field
   // - "dark": Use the theme indicated by the "dark" field
   "theme": {
-    "mode": "system",
+    "mode": "dark",
     "light": "Catppuccin Latte",
-    "dark": "Catppuccin Mocha",
+    "dark": "Aaykra",
   },
   "icon_theme": {
-    "mode": "system",
+    "mode": "dark",
     "light": "Material Icon Theme Light",
     "dark": "Material Icon Theme",
   },
