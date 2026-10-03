@@ -4336,7 +4336,7 @@ impl LspCommand for InlayHints {
         lsp_store: Entity<LspStore>,
         buffer: Entity<Buffer>,
         server_id: LanguageServerId,
-        cx: AsyncApp,
+        mut cx: AsyncApp,
     ) -> anyhow::Result<Vec<InlayHint>> {
         let (lsp_adapter, lsp_server) =
             language_server_for_buffer(&lsp_store, &buffer, server_id, &mut cx)?;
