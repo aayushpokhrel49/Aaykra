@@ -411,7 +411,7 @@
       // Change the default action on `menu::Confirm` by setting the parameter
       // "ctrl-alt-o": ["projects::OpenRecent", { "create_new_window": true }],
       "f11": "aaykra::ToggleFullScreen",
-      "ctrl-r": "projects::OpenRecent",
+      "ctrl-alt-o": "projects::OpenRecent",
       // Change to open path modal for existing remote connection by setting the parameter
       // "ctrl-shift-alt-o": ["projects::OpenRemote", { "from_existing_connection": true }],
       "ctrl-shift-alt-o": ["projects::OpenRemote", { "from_existing_connection": false }],
@@ -487,7 +487,10 @@
       // "foo-bar": ["task::Spawn", { "task_name": "MyTask", "reveal_target": "dock" }]
       // or by tag:
       // "foo-bar": ["task::Spawn", { "task_tag": "MyTag" }],
-      "f5": "debugger::Rerun",
+      // Builds and runs the current file, like Dev-C++'s "Execute". `ctrl-r` used to open
+      // the recent projects menu, which is on `ctrl-alt-o` instead.
+      "ctrl-r": "task::RunCurrentFile",
+      "f5": "task::RunCurrentFile",
       "ctrl-f4": "workspace::CloseActiveDock",
     },
   },
@@ -495,8 +498,8 @@
     "context": "Workspace && debugger_running",
     "use_key_equivalents": true,
     "bindings": {
-      // Unbind `f5` to avoid dispatching the `debugger::Rerun` as that is what `f5` is bound to in the `Workspace`
-      // context.
+      // Unbind `f5` so that it does not build and run the current file while a debug
+      // session owns the workspace; `ctrl-r` still does.
       "f5": null,
     },
   },

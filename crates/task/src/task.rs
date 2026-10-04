@@ -2,6 +2,7 @@
 
 mod adapter_schema;
 mod debug_format;
+pub mod run;
 mod serde_helpers;
 pub mod static_source;
 mod task_template;

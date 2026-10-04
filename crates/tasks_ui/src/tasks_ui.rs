@@ -13,6 +13,7 @@ use tree_sitter::{Query, StreamingIterator as _};
 use workspace::Workspace;
 
 mod modal;
+mod run_current_file;
 
 pub use modal::{Rerun, ShowAttachModal, Spawn, TaskOverrides, TasksModal};
 
@@ -103,6 +104,7 @@ pub fn init(cx: &mut App) {
         |workspace: &mut Workspace, _: Option<&mut Window>, _: &mut Context<Workspace>| {
             workspace
                 .register_action(spawn_task_or_modal)
+                .register_action(crate::run_current_file::run_current_file)
                 .register_action(move |workspace, action: &modal::Rerun, window, cx| {
                     if let Some((task_source_kind, mut last_scheduled_task)) = workspace
                         .project()

@@ -534,6 +534,14 @@ pub struct OpenRemote {
     pub create_new_window: Option<bool>,
 }
 
+actions!(
+    task,
+    [
+        /// Builds and runs the current file, like Dev-C++'s "Execute" does.
+        RunCurrentFile,
+    ]
+);
+
 /// Where to spawn the task in the UI.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

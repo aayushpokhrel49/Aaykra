@@ -422,7 +422,6 @@
       // Change the default action on `menu::Confirm` by setting the parameter
       // "alt-ctrl-o": ["projects::OpenRecent", { "create_new_window": true }],
       "alt-ctrl-o": "projects::OpenRecent",
-      "ctrl-r": "projects::OpenRecent",
       "alt-shift-open": ["projects::OpenRemote", { "from_existing_connection": false }],
       // Change to open path modal for existing remote connection by setting the parameter
       // "alt-ctrl-shift-o": ["projects::OpenRemote", { "from_existing_connection": true }],
@@ -508,15 +507,18 @@
       // "foo-bar": ["task::Spawn", { "task_name": "MyTask", "reveal_target": "dock" }]
       // or by tag:
       // "foo-bar": ["task::Spawn", { "task_tag": "MyTag" }],
-      "f5": "debugger::Rerun",
+      // Builds and runs the current file, like Dev-C++'s "Execute". `ctrl-r` used to open
+      // the recent projects menu, which is on `alt-open` and `alt-ctrl-o` instead.
+      "ctrl-r": "task::RunCurrentFile",
+      "f5": "task::RunCurrentFile",
       "ctrl-f4": "workspace::CloseActiveDock",
     },
   },
   {
     "context": "Workspace && debugger_running",
     "bindings": {
-      // Unbind `f5` to avoid dispatching the `debugger::Rerun` as that is what `f5` is bound to in the `Workspace`
-      // context.
+      // Unbind `f5` so that it does not build and run the current file while a debug
+      // session owns the workspace; `ctrl-r` still does.
       "f5": null,
     },
   },
