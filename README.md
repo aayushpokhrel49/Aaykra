@@ -24,8 +24,6 @@
 AAYKRA pairs the speed of a native application with the familiarity of a modern
 IDE, and stays out of your way. Previously known as **Aayushi**.
 
-![AAYKRA](assets/images/screenshot-dark.png)
-
 ## Features
 
 - **Blazing fast** — GPU-accelerated rendering, incremental parsing, and a
