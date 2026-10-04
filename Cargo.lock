@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aaykra"
-version = "1.0.90"
+version = "1.0.95"
 dependencies = [
  "aaykra_actions",
  "aaykra_env_vars",

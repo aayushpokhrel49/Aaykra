@@ -7,6 +7,9 @@ release body.
 
 ## Unreleased
 
+## 1.0.95 - 2026-10-04
+
+- Added a built-in "Run Current File" action, bound to `Ctrl-R` and `F5`, which builds and runs the file you are looking at the way Dev-C++'s "Execute" does. The language of the active buffer picks the recipe, and C, C++, and Rust compile first and then run the result, Java compiles and runs the class sharing the file's name, and Python, JavaScript, and Go run through their interpreter. The file is saved before it runs, and output goes to the terminal panel with the usual rerun button. A language with no run command reports that instead of failing silently. Note that `Ctrl-R` no longer opens the recent projects menu (it is still on `Alt-Open`, `Alt-Ctrl-O`, and the command palette) and `F5` no longer reruns a debug session outside of an active debug session.
 - Added the Aaykra theme, a dark theme that is now the default for new and existing installs. It is bundled with the binary rather than fetched from the extension registry, and the default appearance is pinned to dark instead of following the system, so the app no longer changes theme with the OS. `Catppuccin Latte` is still used when light appearance is requested.
 - Fixed Git commands failing when a branch or ref name also matches a path in the working tree. A branch like \`docs/rewrite\` in a repository that also has a \`docs/rewrite\` directory made git reject the revision as ambiguous, so the Git panel's History tab reported "Failed to load commit history" and commit search returned nothing. Revisions are now terminated with \`--\`, and \`--no-ext-diff\` is passed directly after the subcommand so it is not read as a pathspec.
 - Fixed a diagnostic for a path outside the worktree discarding every other diagnostic in the same batch.

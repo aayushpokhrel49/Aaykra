@@ -2,7 +2,7 @@
 description = "The fast, native VSCode alternative."
 edition.workspace = true
 name = "aaykra"
-version = "1.0.90"
+version = "1.0.95"
 publish.workspace = true
 license = "GPL-3.0-or-later"
 repository = "https://github.com/aayushpokhrel49/Aaykra"
