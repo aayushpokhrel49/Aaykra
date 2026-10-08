@@ -48,3 +48,12 @@ windows.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation.workspace = true
 
+<<<<<<< 5a0780efc8eaf2484f8abfa16efc6194cfe72888
+=======
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tokio-native-tls = "0.3"
+
+[target.'cfg(not(any(target_os = "windows", target_os = "macos")))'.dependencies]
+rustls-pki-types = "1.12"
+tokio-rustls = { workspace = true, features = ["tls12", "ring"] }
+>>>>>>> 2abf58ae93479ba0ebd02d357f3332c9d40baf50

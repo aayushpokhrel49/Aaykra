@@ -71,6 +71,37 @@ pub fn update_value_in_json_text<'a>(
     }
 }
 
+#[cfg(feature = "editing")]
+pub fn find_value_range_in_json_text<T: AsRef<str>>(
+    text: &str,
+    key_path: &[T],
+) -> Option<Range<usize>> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_json::LANGUAGE.into())
+        .ok()?;
+    let syntax_tree = parser.parse(text, None)?;
+    let mut node = syntax_tree.root_node();
+    if node.kind() == TS_DOCUMENT_KIND {
+        let mut cursor = node.walk();
+        node = node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() != TS_COMMENT_KIND)?;
+    }
+    for key in key_path {
+        let key_json = serde_json::to_string(key.as_ref()).ok()?;
+        let mut cursor = node.walk();
+        let value = node.named_children(&mut cursor).find_map(|pair| {
+            let key_node = pair.child_by_field_name("key")?;
+            (text.get(key_node.byte_range()) == Some(key_json.as_str()))
+                .then(|| pair.child_by_field_name("value"))
+                .flatten()
+        })?;
+        node = value;
+    }
+    Some(node.byte_range())
+}
+
 /// * `replace_key` - When an exact key match according to `key_path` is found, replace the key with `replace_key` if `Some`.
 #[cfg(feature = "editing")]
 pub fn replace_value_in_json_text<T: AsRef<str>>(
@@ -2615,7 +2646,11 @@ mod tests {
 
         let mut renamed = input;
         let (range, replacement) =
+<<<<<<< 5a0780efc8eaf2484f8abfa16efc6194cfe72888
             replace_value_in_json_text(&mut renamed, &[key], 4, Some(&json!("V2")), Some("plain"));
+=======
+            replace_value_in_json_text(&renamed, &[key], 4, Some(&json!("V2")), Some("plain"));
+>>>>>>> 2abf58ae93479ba0ebd02d357f3332c9d40baf50
         renamed.replace_range(range, &replacement);
         let parsed: Value = serde_json::from_str(&renamed).expect("rename must leave valid JSON");
         pretty_assertions::assert_eq!(parsed, json!({ "plain": "V2", "theme": "One Dark" }));
@@ -2699,5 +2734,39 @@ mod tests {
             [{"label": "b"}]
         "#;
         parse_json_with_comments::<Vec<Value>>(trailing).unwrap_err();
+    }
+
+    #[test]
+    fn test_find_value_range_in_json_text() {
+        let text = r#"// "edit_predictions": { "disabled_globs": ["commented/**"] },
+        {
+            // "disabled_globs": ["commented/**"],
+            "languages": { "edit_predictions": { "disabled_globs": ["nested/**"] } },
+            "edit_predictions": {
+                /* "disabled_globs": ["commented/**"], */
+                "mode": "subtle",
+                "disabled_globs": ["live/**", /* ] */ "..."], // ]
+            }
+        }"#;
+        let range = find_value_range_in_json_text(text, &["edit_predictions", "disabled_globs"])
+            .expect("value range");
+        assert_eq!(&text[range], r#"["live/**", /* ] */ "..."]"#);
+        assert_eq!(
+            find_value_range_in_json_text(text, &["edit_predictions", "missing"]),
+            None
+        );
+        assert_eq!(find_value_range_in_json_text(text, &["missing"]), None);
+        assert_eq!(
+            find_value_range_in_json_text("// only a comment", &["edit_predictions"]),
+            None
+        );
+        assert_eq!(
+            find_value_range_in_json_text("", &["edit_predictions"]),
+            None
+        );
+        assert_eq!(
+            find_value_range_in_json_text(r#"{"a": 1}"#, &["a", "b"]),
+            None
+        );
     }
 }

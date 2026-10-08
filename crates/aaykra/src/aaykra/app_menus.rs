@@ -1,6 +1,8 @@
 use aaykra_actions::{Quit, debug_panel, dev, git_panel, project_panel};
 use gpui::{App, Menu, MenuItem, OsAction};
+use project::DisableAiSettings;
 use release_channel::ReleaseChannel;
+use settings::Settings;
 use terminal_view::terminal_panel;
 
 pub fn app_menus(cx: &mut App) -> Vec<Menu> {
@@ -41,11 +43,21 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
         MenuItem::action("Terminal Panel", terminal_panel::Toggle),
         MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
+<<<<<<< 5a0780efc8eaf2484f8abfa16efc6194cfe72888:crates/aaykra/src/aaykra/app_menus.rs
+=======
+    ];
+
+    if !DisableAiSettings::get_global(cx).disable_ai {
+        view_items.push(MenuItem::action("Agent Panel", assistant::ToggleFocus));
+    }
+
+    view_items.extend([
+>>>>>>> 2abf58ae93479ba0ebd02d357f3332c9d40baf50:crates/zed/src/zed/app_menus.rs
         MenuItem::action("Git Panel", git_panel::ToggleFocus),
         MenuItem::separator(),
         MenuItem::action("Diagnostics", diagnostics::Deploy),
         MenuItem::separator(),
-    ];
+    ]);
 
     if ReleaseChannel::try_global(cx) == Some(ReleaseChannel::Dev) {
         view_items.push(MenuItem::action(

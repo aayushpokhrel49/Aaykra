@@ -1,8 +1,13 @@
 [package]
 description = "The fast, native VSCode alternative."
 edition.workspace = true
+<<<<<<< 5a0780efc8eaf2484f8abfa16efc6194cfe72888:crates/aaykra/Cargo.toml
 name = "aaykra"
 version = "1.0.95"
+=======
+name = "zed"
+version = "1.23.2"
+>>>>>>> 2abf58ae93479ba0ebd02d357f3332c9d40baf50:crates/zed/Cargo.toml
 publish.workspace = true
 license = "GPL-3.0-or-later"
 repository = "https://github.com/aayushpokhrel49/Aaykra"
@@ -13,11 +18,6 @@ default-run = "aaykra"
 workspace = true
 
 [features]
-inspector = [
-    "gpui/inspector",
-    "inspector_ui/inspector",
-    "ui/derive_inspector_reflection",
-]
 tracy = ["ztracing/tracy"]
 # LEAK_BACKTRACE=1 cargo run --features zed/track-project-leak --profile release-fast
 track-project-leak = ["gpui/leak-detection"]
@@ -102,8 +102,8 @@ gpui_platform = { workspace = true, features = [
     "x11",
 ] }
 gpui_tokio.workspace = true
+hang_telemetry.workspace = true
 image = { workspace = true, optional = true }
-spin = "0.10.0"
 itertools.workspace = true
 rayon.workspace = true
 semver.workspace = true
@@ -125,6 +125,7 @@ language_tools.workspace = true
 languages = { workspace = true, features = ["load-grammars"] }
 libc.workspace = true
 line_ending_selector.workspace = true
+lsp_command_selector.workspace = true
 log.workspace = true
 lsp_locations.workspace = true
 markdown.workspace = true
