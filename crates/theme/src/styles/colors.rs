@@ -163,7 +163,6 @@ pub struct ThemeColors {
     /// The border color of the minimap thumb.
     pub minimap_thumb_border: Hsla,
 
-
     // ===
     // Editor
     // ===
