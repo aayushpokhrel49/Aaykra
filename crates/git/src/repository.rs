@@ -5540,6 +5540,164 @@ mod tests {
         assert_eq!(graph_data[0].sha, commit_sha);
     }
 
+    /// A branch whose name also names a path in the working tree - `docs/rewrite` in a
+    /// repository that also has a `docs/rewrite` directory - made git reject the revision
+    /// as ambiguous, so the git panel's History tab reported "Failed to load commit
+    /// history" and commit search silently returned nothing.
+    #[gpui::test]
+    async fn test_initial_graph_data_with_branch_named_after_a_path(cx: &mut TestAppContext) {
+        disable_git_global_config();
+
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        git_init_repo(repo_dir.path());
+        fs::create_dir_all(repo_dir.path().join("docs/rewrite")).unwrap();
+        fs::write(repo_dir.path().join("docs/rewrite/notes.md"), "notes").unwrap();
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "Add rewrite notes"]);
+        git_command(repo_dir.path(), ["checkout", "-b", "docs/rewrite"]);
+
+        let commit_sha: Oid = git_command_output(repo_dir.path(), ["rev-parse", "HEAD"])
+            .parse()
+            .unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let (request_tx, request_rx) = async_channel::unbounded();
+
+        repo.initial_graph_data(
+            LogSource::Branch("docs/rewrite".into()),
+            LogOrder::DateOrder,
+            request_tx,
+        )
+        .await
+        .unwrap();
+
+        let graph_data = request_rx.recv().await.unwrap();
+        assert_eq!(graph_data.len(), 1);
+        assert_eq!(graph_data[0].sha, commit_sha);
+    }
+
+    /// The branch diff passes the base ref straight to `git diff`, so a branch named after
+    /// a path in the working tree broke it the same way. `git diff` takes the same `--`
+    /// terminator, so the base ref is terminated like the log sources are.
+    #[gpui::test]
+    async fn test_merge_base_worktree_diff_with_branch_named_after_a_path(cx: &mut TestAppContext) {
+        disable_git_global_config();
+
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        git_init_repo(repo_dir.path());
+        fs::create_dir_all(repo_dir.path().join("docs/rewrite")).unwrap();
+        let notes_path = repo_dir.path().join("docs/rewrite/notes.md");
+        fs::write(&notes_path, "notes\n").unwrap();
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "Add rewrite notes"]);
+        git_command(repo_dir.path(), ["checkout", "-b", "docs/rewrite"]);
+
+        let base_oid: Oid =
+            git_command_output(repo_dir.path(), ["rev-parse", "HEAD:docs/rewrite/notes.md"])
+                .parse()
+                .unwrap();
+
+        fs::write(&notes_path, "edited\n").unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let diff = repo
+            .diff_tree(DiffTreeType::MergeBaseWithWorktree {
+                base: "docs/rewrite".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            diff,
+            TreeDiff {
+                entries: HashMap::from_iter([(
+                    RepoPath::new("docs/rewrite/notes.md").unwrap(),
+                    TreeDiffStatus::Modified { old: base_oid },
+                )]),
+            }
+        );
+    }
+
+    /// `show` takes the revision the user typed in the "open commit by ref" input, so a
+    /// branch named after a path in the working tree reaches git unqualified there too.
+    #[gpui::test]
+    async fn test_show_with_branch_named_after_a_path(cx: &mut TestAppContext) {
+        disable_git_global_config();
+
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        git_init_repo(repo_dir.path());
+        fs::create_dir_all(repo_dir.path().join("docs/rewrite")).unwrap();
+        fs::write(repo_dir.path().join("docs/rewrite/notes.md"), "notes").unwrap();
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "Add rewrite notes"]);
+        git_command(repo_dir.path(), ["checkout", "-b", "docs/rewrite"]);
+
+        let commit_sha: Oid = git_command_output(repo_dir.path(), ["rev-parse", "HEAD"])
+            .parse()
+            .unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let details = repo.show("docs/rewrite".to_string()).await.unwrap();
+        assert_eq!(details.sha.as_ref(), commit_sha.to_string());
+    }
+
+    #[test]
+    fn test_log_source_terminates_revisions() {
+        // Every revision-taking source has to end the revision list, or git cannot tell a
+        // branch name from an identically named path. `Path` is the exception: it states
+        // the separator itself, before the path it is passing.
+        for source in [
+            LogSource::All,
+            LogSource::Branch("docs/rewrite".into()),
+            LogSource::Sha(Oid::from_str("0000000000000000000000000000000000000000").unwrap()),
+        ] {
+            let args = source.get_args();
+            assert_eq!(
+                args.last().map(|arg| arg.as_ref()),
+                Some("--"),
+                "{source:?} must terminate its revisions"
+            );
+        }
+
+        let path_source = LogSource::Path(RepoPath::new("docs/rewrite").unwrap());
+        let path_args = path_source.get_args();
+        assert_eq!(
+            path_args.iter().filter(|arg| arg.as_ref() == "--").count(),
+            1,
+            "Path states the separator itself and must not gain a second one"
+        );
+    }
+
     #[gpui::test]
     async fn test_build_command_untrusted_includes_both_safety_args(cx: &mut TestAppContext) {
         cx.executor().allow_parking();

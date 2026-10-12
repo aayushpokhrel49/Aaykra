@@ -641,7 +641,6 @@ pub fn render_table_row(
         Some(widths) => widths.clone().map(Some),
         None => vec![None; cols].into_table_row(cols),
     };
-
     let mut row = div()
         // NOTE: `h_flex()` sneakily applies `items_center()` which is not default behavior for div element.
         // Applying `.flex().flex_row()` manually to overcome that

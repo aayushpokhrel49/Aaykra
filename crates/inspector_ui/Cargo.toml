@@ -10,9 +10,7 @@ workspace = true
 
 [lib]
 path = "src/inspector_ui.rs"
-
-[features]
-inspector = []
+doctest = false
 
 [dependencies]
 anyhow.workspace = true
@@ -29,4 +27,20 @@ ui.workspace = true
 util.workspace = true
 util_macros.workspace = true
 workspace.workspace = true
+<<<<<<< 36f862cd2a9bdd69d6ae51e0d8209750eb34ad02
 aaykra_actions.workspace = true
+=======
+zed_actions.workspace = true
+
+[dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
+futures.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+language = { workspace = true, features = ["test-support"] }
+paths.workspace = true
+project = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+snippet_provider.workspace = true
+theme.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
+>>>>>>> d890e767d02f06ddf8f58adf4a8c4ad0e397518f
