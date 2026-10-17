@@ -284,12 +284,18 @@ impl LspStore {
         server_id: LanguageServerId,
         cx: &mut Context<Self>,
     ) -> Task<anyhow::Result<InlayHint>> {
+        if !self.text_document_capability_matches_for_server(
+            &buffer,
+            server_id,
+            "textDocument/inlayHint",
+            |capabilities| InlayHints::can_resolve_inlays(capabilities.server_capabilities),
+            cx,
+        ) {
+            hint.resolve_state = ResolveState::Resolved;
+            return Task::ready(Ok(hint));
+        }
+
         if let Some((upstream_client, project_id)) = self.upstream_client() {
-            if !self.check_if_capable_for_proto_request(&buffer, InlayHints::can_resolve_inlays, cx)
-            {
-                hint.resolve_state = ResolveState::Resolved;
-                return Task::ready(Ok(hint));
-            }
             let request = proto::ResolveInlayHint {
                 project_id,
                 buffer_id: buffer.read(cx).remote_id().into(),
@@ -314,13 +320,14 @@ impl LspStore {
             }) else {
                 return Task::ready(Ok(hint));
             };
-            if !InlayHints::can_resolve_inlays(&lang_server.capabilities()) {
-                return Task::ready(Ok(hint));
-            }
             let buffer_snapshot = buffer.read(cx).snapshot();
             let request_timeout = ProjectSettings::get_global(cx)
                 .global_lsp_settings
                 .get_request_timeout();
+<<<<<<< 3f25e2e78286760c00861f1b12a3854be58f3823
+=======
+            let origin_position = hint.position;
+>>>>>>> fe72d5915c082e23b758fca13580969e7201e7b4
             cx.background_spawn(async move {
                 let resolve_task = lang_server.request::<lsp::request::InlayHintResolveRequest>(
                     InlayHints::project_to_lsp_hint(hint, &buffer_snapshot),
@@ -332,7 +339,11 @@ impl LspStore {
                     .context("inlay hint resolve LSP request")?;
                 Ok(InlayHints::lsp_to_project_hint(
                     resolved_hint,
+<<<<<<< 3f25e2e78286760c00861f1b12a3854be58f3823
                     &buffer_snapshot,
+=======
+                    origin_position,
+>>>>>>> fe72d5915c082e23b758fca13580969e7201e7b4
                     server_id,
                     ResolveState::Resolved,
                     false,

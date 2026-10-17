@@ -206,6 +206,7 @@ pub struct ThemeSettingsContent {
     #[schemars(default = "default_font_features")]
     pub buffer_font_features: Option<FontFeaturesContent>,
     pub git_commit_buffer_font_size: Option<FontSize>,
+<<<<<<< 3f25e2e78286760c00861f1b12a3854be58f3823
     /// The name of a font to use for rendering in the markdown preview.
     /// Falls back to the UI font if unset.
     pub markdown_preview_font_family: Option<FontFamilyName>,
@@ -219,6 +220,12 @@ pub struct ThemeSettingsContent {
     /// Falls back to the main editor theme if unset.
     pub markdown_preview_theme: Option<ThemeSelection>,
     /// The name of the AAYKRA theme to use.
+=======
+    /// The name of a font to use for rendering Mermaid diagrams in the agent
+    /// panel and markdown preview. Falls back to the UI font if unset.
+    pub mermaid_font_family: Option<FontFamilyName>,
+    /// The name of the Zed theme to use.
+>>>>>>> fe72d5915c082e23b758fca13580969e7201e7b4
     pub theme: Option<ThemeSelection>,
     /// The name of the icon theme to use.
     pub icon_theme: Option<IconThemeSelection>,
@@ -846,6 +853,10 @@ pub struct ThemeColorsContent {
     #[serde(rename = "editor.foreground")]
     pub editor_foreground: Option<ThemeColor>,
 
+    /// Text color used for CodeLens items in the editor.
+    #[serde(rename = "editor.code_lens.foreground")]
+    pub editor_code_lens_foreground: Option<ThemeColor>,
+
     #[serde(rename = "editor.background")]
     pub editor_background: Option<ThemeColor>,
 
@@ -1304,6 +1315,8 @@ pub enum WindowBackgroundContent {
     Opaque,
     Transparent,
     Blurred,
+    MicaBackdrop,
+    MicaAltBackdrop,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]

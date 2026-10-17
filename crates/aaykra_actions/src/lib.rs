@@ -215,7 +215,19 @@ pub mod dev {
         dev,
         [
             /// Toggles the developer inspector for debugging UI elements.
+<<<<<<< 3f25e2e78286760c00861f1b12a3854be58f3823:crates/aaykra_actions/src/lib.rs
             ToggleInspector
+=======
+            ToggleInspector,
+            /// Cycles the debug frame-time overlay between hidden, current
+            /// frame-time, and detailed frame-time statistics.
+            ToggleFpsOverlay,
+            /// Resets the debug frame-time overlay's statistics, except for the
+            /// total frame count.
+            ResetFrameOverlayStats,
+            /// Opens the key context view for debugging keybindings.
+            OpenKeyContextView
+>>>>>>> fe72d5915c082e23b758fca13580969e7201e7b4:crates/zed_actions/src/lib.rs
         ]
     );
 }
