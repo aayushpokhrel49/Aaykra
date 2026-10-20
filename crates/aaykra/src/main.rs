@@ -2,7 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod reliability;
+<<<<<<< 22c8b7d73a3a2ddd26255f4e5b2a0906a54f8679:crates/aaykra/src/main.rs
 mod aaykra;
+=======
+mod watcher_debug;
+mod zed;
+>>>>>>> ebfd7910220cb92dc7a149601d38efb08fe49910:crates/zed/src/main.rs
 
 use anyhow::{Context as _, Result};
 use clap::Parser;
@@ -307,6 +312,9 @@ fn main() {
     }
     ztracing::init();
 
+    #[cfg(unix)]
+    util::increase_open_file_limit().log_err();
+
     let version = option_env!("ZED_BUILD_ID");
     let app_commit_sha =
         option_env!("ZED_COMMIT_SHA").map(|commit_sha| AppCommitSha::new(commit_sha.to_string()));
@@ -406,7 +414,7 @@ fn main() {
         log::info!("Using git binary path: {:?}", git_binary_path);
     }
 
-    let fs = Arc::new(RealFs::new(git_binary_path, app.background_executor()));
+    let fs = RealFs::new(git_binary_path, app.background_executor());
     let (user_keymap_file_rx, user_keymap_watcher) = watch_config_file(
         &app.background_executor(),
         fs.clone(),
@@ -579,6 +587,7 @@ fn main() {
         });
         AppState::set_global(app_state.clone(), cx);
 
+        watcher_debug::init(app_state.clone(), cx);
         auto_update::init(client.clone(), cx);
         dap_adapters::init(cx);
         auto_update_ui::init(cx);
@@ -599,7 +608,37 @@ fn main() {
             cx.background_executor().clone(),
         );
         command_palette::init(cx);
+<<<<<<< 22c8b7d73a3a2ddd26255f4e5b2a0906a54f8679:crates/aaykra/src/main.rs
         crate::aaykra::remote_debug::init(cx);
+=======
+        let copilot_chat_configuration = copilot_chat::CopilotChatConfiguration {
+            enterprise_uri: settings::CopilotSettings::get_global(cx)
+                .enterprise_uri
+                .clone(),
+        };
+        let credentials_provider = zed_credentials_provider::global(cx);
+        copilot_chat::init(
+            app_state.client.http_client(),
+            credentials_provider,
+            copilot_chat_configuration,
+            cx,
+        );
+
+        copilot_ui::init(&app_state, cx);
+        language_model::init(cx);
+        RefreshLlmTokenListener::register(
+            app_state.client.clone(),
+            app_state.user_store.clone(),
+            cx,
+        );
+        language_models::init(app_state.user_store.clone(), app_state.client.clone(), cx);
+        acp_tools::init(cx);
+        zed::telemetry_log::init(cx);
+        zed::remote_debug::init(cx);
+        edit_prediction_ui::init(cx);
+        web_search::init(cx);
+        web_search_providers::init(app_state.client.clone(), app_state.user_store.clone(), cx);
+>>>>>>> ebfd7910220cb92dc7a149601d38efb08fe49910:crates/zed/src/main.rs
         snippet_provider::init(cx);
 
         recent_projects::init(cx);
@@ -640,6 +679,7 @@ fn main() {
         encoding_selector::init(cx);
         language_selector::init(cx);
         line_ending_selector::init(cx);
+        lsp_command_selector::init(cx);
         toolchain_selector::init(cx);
         theme_selector::init(cx);
         settings_profile_selector::init(cx);

@@ -7,6 +7,7 @@ use crate::{Oid, RunHook, SHA256_HEX_LENGTH, SHORT_SHA_LENGTH};
 use anyhow::{Context as _, Result, anyhow, bail};
 use async_channel::Sender;
 use collections::HashMap;
+use file_content::{ByteContent, decode_byte_header};
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use futures::io::BufWriter;
@@ -569,8 +570,6 @@ impl CommitDetails {
     }
 }
 
-/// Detects if content is binary by checking for NUL bytes in the first 8000 bytes.
-/// This matches git's binary detection heuristic.
 pub fn is_binary_content(content: &[u8]) -> bool {
     let check_len = content.len().min(8000);
     content[..check_len].contains(&0)
@@ -598,7 +597,8 @@ async fn read_commit_blob<R: smol::io::AsyncBufRead + Unpin>(
     stdout.read_exact(&mut bytes).await?;
     stdout.read_exact(newline).await?;
 
-    let is_binary = is_binary_content(&bytes);
+    let is_binary =
+        is_binary_content(&bytes) || decode_byte_header(&bytes).1 == ByteContent::Binary;
     Ok(LoadedCommitObject {
         content: bytes,
         is_binary,
@@ -1154,6 +1154,7 @@ pub trait GitRepository: Send + Sync {
 
     fn commit_data_reader(&self) -> Result<CommitDataReader>;
 
+    fn create_ref(&self, ref_name: String, commit: String) -> BoxFuture<'_, Result<()>>;
     fn update_ref(&self, ref_name: String, commit: String) -> BoxFuture<'_, Result<()>>;
 
     fn delete_ref(&self, ref_name: String) -> BoxFuture<'_, Result<()>>;
@@ -1203,6 +1204,7 @@ pub struct RealGitRepository {
 
 #[derive(Debug)]
 pub enum RefEdit {
+    Create { ref_name: String, commit: String },
     Update { ref_name: String, commit: String },
     Delete { ref_name: String },
 }
@@ -1210,6 +1212,14 @@ pub enum RefEdit {
 impl RefEdit {
     fn into_args(self) -> Vec<OsString> {
         match self {
+            Self::Create { ref_name, commit } => {
+                vec![
+                    "update-ref".into(),
+                    ref_name.into(),
+                    commit.into(),
+                    "".into(),
+                ]
+            }
             Self::Update { ref_name, commit } => {
                 vec!["update-ref".into(), ref_name.into(), commit.into()]
             }
@@ -2840,6 +2850,10 @@ impl GitRepository for RealGitRepository {
             Ok(())
         }
         .boxed()
+    }
+
+    fn create_ref(&self, ref_name: String, commit: String) -> BoxFuture<'_, Result<()>> {
+        self.edit_ref(RefEdit::Create { ref_name, commit })
     }
 
     fn update_ref(&self, ref_name: String, commit: String) -> BoxFuture<'_, Result<()>> {
@@ -4479,6 +4493,18 @@ mod tests {
     use gpui::TestAppContext;
 
     #[test]
+    fn test_create_ref_requires_ref_to_not_exist() {
+        assert_eq!(
+            RefEdit::Create {
+                ref_name: "refs/tags/v1.0.0".to_string(),
+                commit: "abcdef".to_string(),
+            }
+            .into_args(),
+            ["update-ref", "refs/tags/v1.0.0", "abcdef", ""].map(OsString::from)
+        );
+    }
+
+    #[test]
     fn test_commit_hash_search_query_accepts_sha1_and_sha256_hashes() {
         assert_eq!(
             commit_hash_search_query("0123456789abcdef0123456789abcdef01234567"),
@@ -4858,6 +4884,43 @@ mod tests {
                 )]),
             }
         );
+    }
+
+    #[test]
+    fn test_read_commit_blob_binary_detection() {
+        let mut pickle = b"\x80\x02X\0\x04\0\0".to_vec();
+        pickle.extend_from_slice(&b"A\0".repeat(512));
+        pickle.extend_from_slice(b"q\0.");
+        let mut cases = vec![
+            (pickle, true),
+            (b"hello\n".to_vec(), false),
+            (b"\xFF\xFEH\0e\0l\0l\0o\0\n\0".to_vec(), true),
+            (b"\xFE\xFF\0H\0e\0l\0l\0o\0\n".to_vec(), true),
+            (b"H\0e\0l\0l\0o\0\n\0".to_vec(), true),
+            (b"\0H\0e\0l\0l\0o\0\n".to_vec(), true),
+            (b"\xEF\xBB\xBFhello\0".to_vec(), true),
+            (b"\x89PNG\r\n\x1a\n".to_vec(), true),
+        ];
+        for offset in [4096, 7999, 8000] {
+            let mut bytes = vec![b'a'; offset];
+            bytes.push(0);
+            cases.push((bytes, offset < 8000));
+        }
+
+        for (bytes, expected_binary) in cases {
+            let mut output = format!("{}\n", bytes.len()).into_bytes();
+            output.extend_from_slice(&bytes);
+            output.push(b'\n');
+            let object = smol::block_on(read_commit_blob(
+                &mut smol::io::Cursor::new(output),
+                &mut String::new(),
+                &mut [0],
+            ))
+            .unwrap();
+
+            assert_eq!(object.is_binary, expected_binary);
+            assert_eq!(object.content, bytes);
+        }
     }
 
     #[gpui::test]
@@ -5538,6 +5601,164 @@ mod tests {
         let graph_data = request_rx.recv().await.unwrap();
         assert_eq!(graph_data.len(), 1);
         assert_eq!(graph_data[0].sha, commit_sha);
+    }
+
+    /// A branch whose name also names a path in the working tree - `docs/rewrite` in a
+    /// repository that also has a `docs/rewrite` directory - made git reject the revision
+    /// as ambiguous, so the git panel's History tab reported "Failed to load commit
+    /// history" and commit search silently returned nothing.
+    #[gpui::test]
+    async fn test_initial_graph_data_with_branch_named_after_a_path(cx: &mut TestAppContext) {
+        disable_git_global_config();
+
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        git_init_repo(repo_dir.path());
+        fs::create_dir_all(repo_dir.path().join("docs/rewrite")).unwrap();
+        fs::write(repo_dir.path().join("docs/rewrite/notes.md"), "notes").unwrap();
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "Add rewrite notes"]);
+        git_command(repo_dir.path(), ["checkout", "-b", "docs/rewrite"]);
+
+        let commit_sha: Oid = git_command_output(repo_dir.path(), ["rev-parse", "HEAD"])
+            .parse()
+            .unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let (request_tx, request_rx) = async_channel::unbounded();
+
+        repo.initial_graph_data(
+            LogSource::Branch("docs/rewrite".into()),
+            LogOrder::DateOrder,
+            request_tx,
+        )
+        .await
+        .unwrap();
+
+        let graph_data = request_rx.recv().await.unwrap();
+        assert_eq!(graph_data.len(), 1);
+        assert_eq!(graph_data[0].sha, commit_sha);
+    }
+
+    /// The branch diff passes the base ref straight to `git diff`, so a branch named after
+    /// a path in the working tree broke it the same way. `git diff` takes the same `--`
+    /// terminator, so the base ref is terminated like the log sources are.
+    #[gpui::test]
+    async fn test_merge_base_worktree_diff_with_branch_named_after_a_path(cx: &mut TestAppContext) {
+        disable_git_global_config();
+
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        git_init_repo(repo_dir.path());
+        fs::create_dir_all(repo_dir.path().join("docs/rewrite")).unwrap();
+        let notes_path = repo_dir.path().join("docs/rewrite/notes.md");
+        fs::write(&notes_path, "notes\n").unwrap();
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "Add rewrite notes"]);
+        git_command(repo_dir.path(), ["checkout", "-b", "docs/rewrite"]);
+
+        let base_oid: Oid =
+            git_command_output(repo_dir.path(), ["rev-parse", "HEAD:docs/rewrite/notes.md"])
+                .parse()
+                .unwrap();
+
+        fs::write(&notes_path, "edited\n").unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let diff = repo
+            .diff_tree(DiffTreeType::MergeBaseWithWorktree {
+                base: "docs/rewrite".into(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            diff,
+            TreeDiff {
+                entries: HashMap::from_iter([(
+                    RepoPath::new("docs/rewrite/notes.md").unwrap(),
+                    TreeDiffStatus::Modified { old: base_oid },
+                )]),
+            }
+        );
+    }
+
+    /// `show` takes the revision the user typed in the "open commit by ref" input, so a
+    /// branch named after a path in the working tree reaches git unqualified there too.
+    #[gpui::test]
+    async fn test_show_with_branch_named_after_a_path(cx: &mut TestAppContext) {
+        disable_git_global_config();
+
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+
+        git_init_repo(repo_dir.path());
+        fs::create_dir_all(repo_dir.path().join("docs/rewrite")).unwrap();
+        fs::write(repo_dir.path().join("docs/rewrite/notes.md"), "notes").unwrap();
+        git_command(repo_dir.path(), ["add", "."]);
+        git_command(repo_dir.path(), ["commit", "-m", "Add rewrite notes"]);
+        git_command(repo_dir.path(), ["checkout", "-b", "docs/rewrite"]);
+
+        let commit_sha: Oid = git_command_output(repo_dir.path(), ["rev-parse", "HEAD"])
+            .parse()
+            .unwrap();
+
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        let details = repo.show("docs/rewrite".to_string()).await.unwrap();
+        assert_eq!(details.sha.as_ref(), commit_sha.to_string());
+    }
+
+    #[test]
+    fn test_log_source_terminates_revisions() {
+        // Every revision-taking source has to end the revision list, or git cannot tell a
+        // branch name from an identically named path. `Path` is the exception: it states
+        // the separator itself, before the path it is passing.
+        for source in [
+            LogSource::All,
+            LogSource::Branch("docs/rewrite".into()),
+            LogSource::Sha(Oid::from_str("0000000000000000000000000000000000000000").unwrap()),
+        ] {
+            let args = source.get_args();
+            assert_eq!(
+                args.last().map(|arg| arg.as_ref()),
+                Some("--"),
+                "{source:?} must terminate its revisions"
+            );
+        }
+
+        let path_source = LogSource::Path(RepoPath::new("docs/rewrite").unwrap());
+        let path_args = path_source.get_args();
+        assert_eq!(
+            path_args.iter().filter(|arg| arg.as_ref() == "--").count(),
+            1,
+            "Path states the separator itself and must not gain a second one"
+        );
     }
 
     #[gpui::test]
