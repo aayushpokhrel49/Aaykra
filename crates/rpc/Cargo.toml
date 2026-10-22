@@ -24,14 +24,20 @@ base64.workspace = true
 collections.workspace = true
 futures.workspace = true
 gpui = { workspace = true, optional = true }
+gpui_util.workspace = true
 parking_lot.workspace = true
 proto.workspace = true
 rand.workspace = true
 rsa.workspace = true
 serde.workspace = true
 sha2.workspace = true
+<<<<<<< 54fecbc2bf95f78dee284fd5b04a38d7a45da4ef
 tracing = { version = "0.1.34", features = ["log"] }
 util.workspace = true
+=======
+strum.workspace = true
+tracing = { version = "0.1", default-features = false, features = ["std", "log"] }
+>>>>>>> 1dbd1a070cc5bc5612d61df7aa934e711bdbed50
 zstd.workspace = true
 
 [dev-dependencies]

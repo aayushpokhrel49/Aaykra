@@ -126,6 +126,13 @@ actions!(
         /// Toggles whether the commit message editor fills all the available
         /// vertical space within the git panel.
         ToggleFillCommitEditor,
+<<<<<<< 54fecbc2bf95f78dee284fd5b04a38d7a45da4ef
+=======
+        /// Toggles whether the commit message editor is shown in the git panel.
+        ToggleCommitEditor,
+        /// Generates a commit message using AI.
+        GenerateCommitMessage,
+>>>>>>> 1dbd1a070cc5bc5612d61df7aa934e711bdbed50
         /// Initializes a new git repository.
         Init,
         /// Opens all modified files in the editor.
@@ -141,6 +148,8 @@ actions!(
         AddToGitInfoExclude,
         /// Copies the current branch name to the clipboard.
         CopyBranchName,
+        /// Creates a tag at HEAD.
+        CreateTagAtHead,
     ]
 );
 
