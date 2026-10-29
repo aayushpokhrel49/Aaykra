@@ -1816,7 +1816,23 @@ impl ProjectSearchView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+<<<<<<< 30f4d2a3205d0c2fb19c7d2f2d3cb1438607b68c
         let query_seed = query_seed(workspace, window, cx);
+=======
+        let query_seed = workspace.active_item(cx).and_then(|item| {
+            if let Some(buffer_search_query) = buffer_search_query(workspace, item.as_ref(), cx) {
+                return Some(QuerySeed::Query(buffer_search_query));
+            }
+
+            let editor = item.act_as::<Editor>(cx)?;
+            let query = editor.query_suggestion(None, window, cx);
+            if query.is_empty() {
+                None
+            } else {
+                Some(QuerySeed::Text(query))
+            }
+        });
+>>>>>>> b641a2a628b2c6f6ce09c06dcbccb0931eb0404d
 
         let search = if let Some(existing) = existing {
             workspace.activate_item(&existing, true, true, window, cx);
@@ -1869,8 +1885,12 @@ impl ProjectSearchView {
             if let Some(query) = action.query.as_deref().filter(|query| !query.is_empty()) {
                 search.set_query(query, window, cx);
             } else if let Some(query_seed) = query_seed {
+<<<<<<< 30f4d2a3205d0c2fb19c7d2f2d3cb1438607b68c
                 let query =
                     query_seed.into_query(search.search_options.contains(SearchOptions::REGEX));
+=======
+                let query = query_seed.into_query(search.search_options);
+>>>>>>> b641a2a628b2c6f6ce09c06dcbccb0931eb0404d
                 search.set_query(&query, window, cx);
             }
             if let Some(included_files) = action.included_files.as_deref() {
@@ -2599,6 +2619,7 @@ impl ProjectSearchView {
 }
 
 pub(crate) enum QuerySeed {
+<<<<<<< 30f4d2a3205d0c2fb19c7d2f2d3cb1438607b68c
     /// Content of the buffer search bar: already query syntax, with
     /// escaping already applied if it was seeded in regex mode, so it
     /// must never be re-escaped. It's carried over verbatim even if
@@ -2606,19 +2627,35 @@ pub(crate) enum QuerySeed {
     Query(String),
     /// Raw text from the editor's selection or the word under the
     /// cursor, so it gets escaped when entering a regex query.
+=======
+    /// Content of a search bar: already query syntax, with escaping already
+    /// applied if it was seeded in regex mode, so it must never be re-escaped.
+    /// It's carried over verbatim even if the source search's mode differs.
+    Query(String),
+    /// Raw text from a selection or the word under the cursor, so it gets
+    /// escaped when entering a regex query.
+>>>>>>> b641a2a628b2c6f6ce09c06dcbccb0931eb0404d
     Text(String),
 }
 
 impl QuerySeed {
+<<<<<<< 30f4d2a3205d0c2fb19c7d2f2d3cb1438607b68c
     pub(crate) fn into_query(self, regex: bool) -> String {
         match self {
             QuerySeed::Query(query) => query,
             QuerySeed::Text(text) if regex => regex::escape(&text),
+=======
+    pub(crate) fn into_query(self, options: SearchOptions) -> String {
+        match self {
+            QuerySeed::Query(query) => query,
+            QuerySeed::Text(text) if options.contains(SearchOptions::REGEX) => regex::escape(&text),
+>>>>>>> b641a2a628b2c6f6ce09c06dcbccb0931eb0404d
             QuerySeed::Text(text) => text,
         }
     }
 }
 
+<<<<<<< 30f4d2a3205d0c2fb19c7d2f2d3cb1438607b68c
 pub(crate) fn query_seed(
     workspace: &mut Workspace,
     window: &mut Window,
@@ -2637,6 +2674,8 @@ pub(crate) fn query_seed(
     }
 }
 
+=======
+>>>>>>> b641a2a628b2c6f6ce09c06dcbccb0931eb0404d
 pub(crate) fn buffer_search_query(
     workspace: &mut Workspace,
     item: &dyn ItemHandle,
