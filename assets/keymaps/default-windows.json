@@ -464,6 +464,7 @@
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
+      "ctrl-shift-a": "agent_panel::ToggleFocus",
       "ctrl-k s": "workspace::SaveAll",
       "ctrl-k n": "encoding_selector::Toggle",
       "ctrl-k m": "language_selector::Toggle",
@@ -770,6 +771,16 @@
       "ctrl-shift-space": "git::UnstageAll",
       "ctrl-enter": "git::Commit",
       "ctrl-shift-enter": "git::Amend",
+    },
+  },
+  {
+    "context": "AgentPanel > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "enter": "agent_panel::SendPrompt",
+      "alt-enter": "editor::Newline",
+      "shift-enter": "editor::Newline",
+      "ctrl-alt-p": "agent_panel::TogglePlanMode",
     },
   },
   {

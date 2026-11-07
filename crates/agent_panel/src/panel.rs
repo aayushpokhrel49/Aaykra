@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use agent_acp::{
     AcpAgent, AcpEvent, AcpSession, AgentSpawnConfig, ClientCapabilities, ContentBlock, MessageId,
-    PermissionOutcome, SessionUpdate, StopReason,
+    PermissionOutcome, PlanEntry, SessionUpdate, StopReason,
 };
 use editor::{Editor, EditorMode, MultiBuffer};
 use fs::Fs;
@@ -50,6 +50,8 @@ actions!(
         CancelRun,
         /// Clears the conversation and disconnects the agent.
         ClearConversation,
+        /// Toggles plan mode: analyze first, execute only after approval.
+        TogglePlanMode,
         /// Approves the pending permission request once.
         AllowOnce,
         /// Approves the pending permission request for the rest of the session.
@@ -100,6 +102,10 @@ pub struct AgentPanel {
     api_models: Vec<String>,
     show_model_selector: bool,
     model_selection_task: Option<Task<()>>,
+    plan_mode: bool,
+    pending_plan: Option<String>,
+    awaiting_approved_revision: bool,
+    plan_entries: Vec<PlanEntry>,
 }
 
 impl AgentPanel {
@@ -159,6 +165,10 @@ impl AgentPanel {
             api_models: Vec::new(),
             show_model_selector: false,
             model_selection_task: None,
+            plan_mode: false,
+            pending_plan: None,
+            awaiting_approved_revision: false,
+            plan_entries: Vec::new(),
         });
 
         panel
@@ -347,6 +357,9 @@ impl AgentPanel {
                             self.scroll_handle.scroll_to_bottom();
                         }
                     }
+                    SessionUpdate::Plan { entries } => {
+                        self.plan_entries.extend(entries);
+                    }
                     _ => {}
                 }
                 cx.notify();
@@ -468,7 +481,33 @@ impl AgentPanel {
         self.message_buffer
             .update(cx, |message_buffer, cx| message_buffer.set_text("", cx));
 
-        self.thread.push_user_message(text.clone());
+        let display = text.clone();
+        let wire = self.build_wire_prompt(text);
+        self.submit_text(display, wire, cx);
+    }
+
+    /// Builds the prompt actually sent to the agent. In plan mode the request
+    /// is wrapped in an analyze-only directive; an edited plan is re-submitted
+    /// as an approved revision to execute.
+    fn build_wire_prompt(&mut self, text: String) -> String {
+        if !self.plan_mode {
+            return text;
+        }
+        if self.awaiting_approved_revision {
+            self.awaiting_approved_revision = false;
+            format!("Execute this approved plan exactly:\n{text}")
+        } else {
+            format!(
+                "{text}\n\n[PLAN MODE] Analyze the codebase, identify the relevant files, and \
+                 produce a detailed step-by-step plan (use the plan update when you support it). \
+                 Do NOT modify files or run commands that change the system until the user \
+                 approves the plan."
+            )
+        }
+    }
+
+    fn submit_text(&mut self, display: String, wire: String, cx: &mut Context<Self>) {
+        self.thread.push_user_message(display);
         self.save_current_conversation(cx);
         cx.notify();
 
@@ -476,21 +515,115 @@ impl AgentPanel {
             ActiveAgent::Builtin(profile) => {
                 match &self.status {
                     ConnectionState::Running { .. } | ConnectionState::Working { .. } => {
-                        self.turn(vec![ContentBlock::text(text)], cx);
+                        self.turn(vec![ContentBlock::text(wire)], cx);
                     }
                     ConnectionState::Starting { .. } => {
-                        self.pending_first_message = Some(text);
+                        self.pending_first_message = Some(wire);
                     }
                     ConnectionState::Idle | ConnectionState::Failed { .. } => {
-                        self.pending_first_message = Some(text);
+                        self.pending_first_message = Some(wire);
                         self.start_agent(profile, cx);
                     }
                 }
             }
             ActiveAgent::Api => {
-                self.run_api_turn(text, cx);
+                self.run_api_turn(wire, cx);
             }
         }
+    }
+
+    fn toggle_plan_mode(&mut self, _: &TogglePlanMode, _window: &mut Window, cx: &mut Context<Self>) {
+        self.plan_mode = !self.plan_mode;
+        if !self.plan_mode {
+            self.awaiting_approved_revision = false;
+            self.pending_plan = None;
+            self.plan_entries.clear();
+        }
+        self.show_agent_selector = false;
+        self.show_model_selector = false;
+        self.show_sessions = false;
+        cx.notify();
+    }
+
+    fn approve_plan(&mut self, cx: &mut Context<Self>) {
+        if let Some(plan) = self.pending_plan.take() {
+            self.plan_mode = false;
+            self.awaiting_approved_revision = false;
+            let wire = format!("The user approved this plan. Execute it now, step by step:\n{plan}");
+            self.submit_text("✓ Plan approved — executing.".into(), wire, cx);
+        }
+    }
+
+    fn edit_plan(&mut self, cx: &mut Context<Self>) {
+        if let Some(plan) = self.pending_plan.take() {
+            self.message_buffer.update(cx, |buffer, cx| buffer.set_text(plan, cx));
+            self.awaiting_approved_revision = true;
+            self.pending_plan = None;
+            cx.notify();
+        }
+    }
+
+    fn reject_plan(&mut self, cx: &mut Context<Self>) {
+        if self.pending_plan.take().is_some() {
+            let wire = "The user rejected the proposed plan. Ask clarifying questions or propose a \
+                        revised plan."
+                .to_string();
+            self.submit_text("✗ Plan rejected — asking for revision.".into(), wire, cx);
+        }
+    }
+
+    /// If the just-finished turn ran in plan mode, freeze the captured plan
+    /// into a reviewable summary and write the analysis file.
+    fn finalize_plan_if_needed(&mut self, cx: &mut Context<Self>) {
+        if !self.plan_mode || self.pending_plan.is_some() {
+            return;
+        }
+        let mut content = String::new();
+        if !self.plan_entries.is_empty() {
+            for (index, entry) in self.plan_entries.iter().enumerate() {
+                if index > 0 {
+                    content.push('\n');
+                }
+                content.push_str(&entry.content);
+            }
+        } else if let Some(fallback) = self.thread.timeline().iter().rev().find_map(|item| {
+            match item {
+                TimelineItem::AgentMessage { content } | TimelineItem::AgentThought { content } => {
+                    Some(content.clone())
+                }
+                _ => None,
+            }
+        }) {
+            content = fallback;
+        }
+        if content.trim().is_empty() {
+            return;
+        }
+        self.pending_plan = Some(content.clone());
+        self.plan_entries.clear();
+        self.write_analysis_file(&content, cx);
+        cx.notify();
+    }
+
+    fn write_analysis_file(&self, content: &str, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(root) = workspace.read(cx).worktrees(cx).next().map(|worktree| {
+            worktree.read(cx).abs_path().to_path_buf()
+        }) else {
+            return;
+        };
+        let fs = self.fs.clone();
+        let dir = root.join(".aaykra");
+        let path = dir.join("plan.md");
+        let body = format!("# Plan\n\n{content}");
+        cx.background_spawn(async move {
+            if fs.create_dir(&dir).await.is_ok() {
+                let _ = fs.write(&path, body.as_bytes()).await;
+            }
+        })
+        .detach();
     }
 
     fn cancel_run(&mut self, _: &CancelRun, _: &mut Window, _cx: &mut Context<Self>) {
@@ -780,6 +913,7 @@ fn settle_turn(
                 this.push_system_message(format!("Request failed: {error:#}"), cx);
             }
         }
+        this.finalize_plan_if_needed(cx);
         this.save_current_conversation(cx);
         cx.notify();
     })
@@ -940,6 +1074,8 @@ impl Render for AgentPanel {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::send_prompt))
             .on_action(cx.listener(Self::cancel_run))
+            .on_action(cx.listener(Self::clear_conversation))
+            .on_action(cx.listener(Self::toggle_plan_mode))
             .on_action(cx.listener(Self::allow_once))
             .on_action(cx.listener(Self::allow_always))
             .on_action(cx.listener(Self::reject_once))
@@ -966,6 +1102,7 @@ impl Render for AgentPanel {
                     ),
             )
             .child(self.render_permissions(cx))
+            .child(self.render_plan_banner(cx))
             .child(self.render_input(cx))
     }
 }
@@ -1310,6 +1447,79 @@ impl AgentPanel {
             .into_any_element()
     }
 
+    fn render_plan_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let Some(plan) = &self.pending_plan else {
+            return v_flex();
+        };
+
+        v_flex()
+            .flex_shrink_0()
+            .px_2()
+            .gap_1()
+            .child(
+                v_flex()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(colors.border)
+                    .bg(colors.surface_background)
+                    .px_2()
+                    .py_1p5()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Icon::new(IconName::ListTree)
+                                    .size(IconSize::Small)
+                                    .color(Color::Accent),
+                            )
+                            .child(
+                                Label::new("Plan ready — review before executing")
+                                    .size(LabelSize::Small)
+                                    .color(Color::Default),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .max_h_24()
+                            .overflow_y_scroll()
+                            .child(
+                                Label::new(plan.clone())
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("plan-approve", "Approve")
+                                    .label_size(LabelSize::Small)
+                                    .color(Color::Accent)
+                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                        this.approve_plan(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("plan-edit", "Edit")
+                                    .label_size(LabelSize::Small)
+                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                        this.edit_plan(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("plan-reject", "Reject")
+                                    .label_size(LabelSize::Small)
+                                    .color(Color::Error)
+                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                        this.reject_plan(cx)
+                                    })),
+                            ),
+                    ),
+            )
+    }
+
     fn render_permissions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let pending: Vec<PendingPermission> = self.thread.pending_permissions().to_vec();
@@ -1385,6 +1595,21 @@ impl AgentPanel {
             .tooltip(Tooltip::text("Clear conversation"))
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
                 this.clear_conversation(&ClearConversation, window, cx)
+            }));
+
+        let plan_icon = if self.plan_mode {
+            IconName::BoltFilled
+        } else {
+            IconName::ListTree
+        };
+        let plan_mode_button = IconButton::new("agent-plan-mode", plan_icon)
+            .tooltip(Tooltip::text(if self.plan_mode {
+                "Planning mode ON (Ctrl+Alt+P) — approve plans before they run"
+            } else {
+                "Planning mode OFF (Ctrl+Alt+P)"
+            }))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                this.toggle_plan_mode(&TogglePlanMode, window, cx)
             }));
 
         let sessions_button = IconButton::new("agent-sessions", IconName::Clock)
@@ -1464,6 +1689,7 @@ impl AgentPanel {
                             .child(self.message_editor.clone()),
                     )
                     .child(clear_button)
+                    .child(plan_mode_button)
                     .child(sessions_button)
                     .when_some(model_button, |this, button| this.child(button))
                     .child(selector_trigger)

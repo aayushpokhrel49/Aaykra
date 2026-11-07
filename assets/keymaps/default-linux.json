@@ -735,6 +735,7 @@
       "enter": "agent_panel::SendPrompt",
       "alt-enter": "editor::Newline",
       "shift-enter": "editor::Newline",
+      "ctrl-alt-p": "agent_panel::TogglePlanMode",
     },
   },
   {
