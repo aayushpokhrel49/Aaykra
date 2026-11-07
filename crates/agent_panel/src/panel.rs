@@ -26,8 +26,13 @@ use workspace::{
 use crate::{
     agents::{ActiveAgent, AgentProfile, BUILTIN_PROFILES},
     api::{ApiConfig, stream_chat},
+    panel::AgentPanelStatusItem,
+    session_store::{
+        StoredSessionMeta, delete_session, load_body, load_index, new_session_id, now_unix_secs,
+        save_session, sessions_dir,
+    },
     settings::AgentPanelSettings,
-    thread::{PendingPermission, Thread, TimelineItem},
+    thread::{PendingPermission, PersistedItem, Thread, TimelineItem},
 };
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
@@ -88,6 +93,10 @@ pub struct AgentPanel {
     show_agent_selector: bool,
     api_cancel: Arc<AtomicBool>,
     last_agent: Option<ActiveAgent>,
+    sessions: Vec<StoredSessionMeta>,
+    session_id: Option<String>,
+    session_autosave: Option<Task<()>>,
+    show_sessions: bool,
 }
 
 impl AgentPanel {
@@ -120,7 +129,7 @@ impl AgentPanel {
             })
         };
 
-        cx.new(|cx| Self {
+        let panel = cx.new(|cx| Self {
             workspace: workspace.weak_handle(),
             fs,
             focus_handle: cx.focus_handle(),
@@ -140,7 +149,13 @@ impl AgentPanel {
             show_agent_selector: false,
             api_cancel: Arc::new(AtomicBool::new(false)),
             last_agent: None,
-        })
+            sessions: Vec::new(),
+            session_id: None,
+            session_autosave: None,
+            show_sessions: false,
+        });
+
+        panel
     }
 
     fn working_directory(&self, cx: &App) -> Option<PathBuf> {
@@ -430,6 +445,7 @@ impl AgentPanel {
                 if let Err(error) = result {
                     this.push_system_message(format!("API request failed: {error:#}"), cx);
                 }
+                this.save_current_conversation(cx);
                 cx.notify();
             })
             .ok();
@@ -447,6 +463,7 @@ impl AgentPanel {
             .update(cx, |message_buffer, cx| message_buffer.set_text("", cx));
 
         self.thread.push_user_message(text.clone());
+        self.save_current_conversation(cx);
         cx.notify();
 
         match self.active_agent {
@@ -551,6 +568,9 @@ impl AgentPanel {
         self.pending_first_message = None;
         self.status = ConnectionState::Idle;
         self.api_cancel.store(true, Ordering::Relaxed);
+        self.session_id = None;
+        self.session_autosave = None;
+        self.show_sessions = false;
         cx.notify();
     }
 
@@ -560,6 +580,146 @@ impl AgentPanel {
             Some(ActiveAgent::Api) | None => {
                 self.status = ConnectionState::Idle;
                 cx.notify();
+            }
+        }
+    }
+
+    // Session persistence ----------------------------------------------
+
+    fn load_sessions(&mut self, cx: &mut Context<Self>) {
+        let fs = self.fs.clone();
+        let dir = sessions_dir();
+        cx.spawn(async move |this, cx| {
+            let sessions = load_index(fs, &dir).await.unwrap_or_default();
+            this.update(cx, |this, cx| {
+                this.sessions = sessions;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn restore_latest(&mut self, cx: &mut Context<Self>) {
+        let latest = self.sessions.first().map(|meta| meta.id.clone());
+        if let Some(id) = latest {
+            self.restore_session(id, cx);
+        }
+    }
+
+    fn restore_session(&mut self, id: String, cx: &mut Context<Self>) {
+        let fs = self.fs.clone();
+        let dir = sessions_dir();
+        self.teardown_agent(cx);
+        self.session_autosave = None;
+        let task = cx.spawn(async move |this, cx| {
+            let body = match load_body(fs.clone(), &dir, &id).await {
+                Ok(body) => body,
+                Err(error) => {
+                    log::error!("failed to load agent session {id}: {error}");
+                    return;
+                }
+            };
+            let items: Vec<PersistedItem> = match serde_json::from_str(&body) {
+                Ok(items) => items,
+                Err(_) => return,
+            };
+            let meta = load_index(fs, &dir)
+                .await
+                .ok()
+                .and_then(|metas| metas.into_iter().find(|entry| entry.id == id));
+            this.update(cx, |this, cx| {
+                this.thread = Thread::default();
+                this.thread.import(items);
+                this.session_id = Some(id);
+                this.show_sessions = false;
+                if let Some(meta) = meta {
+                    this.active_agent = agent_from_id(&meta.agent_id);
+                }
+                this.rebuild_markdown(cx);
+                this.status = ConnectionState::Idle;
+                this.pending_first_message = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        self.connection_task = Some(task);
+    }
+
+    fn delete_session(&mut self, id: String, cx: &mut Context<Self>) {
+        let fs = self.fs.clone();
+        let dir = sessions_dir();
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = delete_session(fs, &dir, &id).await {
+                log::error!("failed to delete agent session {id}: {error}");
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.sessions.retain(|entry| entry.id != id);
+                if this.session_id.as_deref() == Some(id.as_str()) {
+                    this.session_id = None;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Persists the current conversation. Called after the conversation
+    /// changes in a meaningful way (a turn was sent or finished).
+    fn save_current_conversation(&mut self, cx: &mut Context<Self>) {
+        if self.thread.timeline().is_empty() {
+            return;
+        }
+        let id = match &self.session_id {
+            Some(id) => id.clone(),
+            None => {
+                let id = new_session_id();
+                self.session_id = Some(id.clone());
+                id
+            }
+        };
+        let fs = self.fs.clone();
+        let dir = sessions_dir();
+        let meta = StoredSessionMeta {
+            id: id.clone(),
+            title: self.thread.title(),
+            agent_id: self.active_agent.id().to_string(),
+            updated_at: now_unix_secs(),
+        };
+        let items = self.thread.export();
+        let json = match serde_json::to_string(&items) {
+            Ok(json) => json,
+            Err(_) => return,
+        };
+        let task = cx.spawn(async move |this, cx| {
+            if let Err(error) = save_session(fs, &dir, &meta, &json).await {
+                log::error!("failed to save agent session: {error}");
+                return;
+            }
+            this.update(cx, |this, cx| {
+                if let Some(existing) = this.sessions.iter_mut().find(|entry| entry.id == meta.id) {
+                    *existing = meta.clone();
+                } else {
+                    this.sessions.push(meta.clone());
+                }
+                this.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                cx.notify();
+            })
+            .ok();
+        });
+        self.session_autosave = Some(task);
+    }
+
+    fn rebuild_markdown(&mut self, cx: &mut Context<Self>) {
+        self.markdown_by_item.clear();
+        for (index, item) in self.thread.timeline().iter().enumerate() {
+            if let TimelineItem::AgentMessage { content } | TimelineItem::AgentThought { content } =
+                item
+            {
+                let markdown = cx.new(|cx| Markdown::new_text(content.clone().into(), cx));
+                self.markdown_by_item.insert(index, markdown);
             }
         }
     }
@@ -584,6 +744,10 @@ pub async fn load(
 ) -> anyhow::Result<Entity<AgentPanel>> {
     let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
         AgentPanel::new(workspace, window, cx)
+    })?;
+    panel.update_in(&mut cx, |this, _window, cx| {
+        this.load_sessions(cx);
+        this.restore_latest(cx);
     })?;
     Ok(panel)
 }
@@ -610,9 +774,34 @@ fn settle_turn(
                 this.push_system_message(format!("Request failed: {error:#}"), cx);
             }
         }
+        this.save_current_conversation(cx);
         cx.notify();
     })
     .ok();
+}
+
+fn agent_from_id(id: &str) -> ActiveAgent {
+    if id == "api" {
+        return ActiveAgent::Api;
+    }
+    BUILTIN_PROFILES
+        .iter()
+        .find(|profile| profile.id == id)
+        .map(ActiveAgent::Builtin)
+        .unwrap_or(ActiveAgent::Builtin(&BUILTIN_PROFILES[0]))
+}
+
+fn format_relative_time(secs: u64) -> String {
+    let ago = now_unix_secs().saturating_sub(secs);
+    if ago < 60 {
+        "just now".to_string()
+    } else if ago < 3600 {
+        format!("{}m ago", ago / 60)
+    } else if ago < 86400 {
+        format!("{}h ago", ago / 3600)
+    } else {
+        format!("{}d ago", ago / 86400)
+    }
 }
 
 impl Focusable for AgentPanel {
@@ -1192,11 +1381,20 @@ impl AgentPanel {
                 this.clear_conversation(&ClearConversation, window, cx)
             }));
 
+        let sessions_button = IconButton::new("agent-sessions", IconName::Clock)
+            .tooltip(Tooltip::text("Sessions"))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                this.show_sessions = !this.show_sessions;
+                this.show_agent_selector = false;
+                cx.notify();
+            }));
+
         let selector_trigger = Button::new("agent-selector", self.active_agent.label())
             .label_size(LabelSize::Small)
             .tooltip(Tooltip::text("Choose agent"))
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                 this.show_agent_selector = !this.show_agent_selector;
+                this.show_sessions = false;
                 cx.notify();
             }));
 
@@ -1207,6 +1405,9 @@ impl AgentPanel {
             .gap_1p5()
             .when(self.show_agent_selector, |this| {
                 this.child(self.render_agent_selector(cx))
+            })
+            .when(self.show_sessions, |this| {
+                this.child(self.render_sessions(cx))
             })
             .child(
                 h_flex()
@@ -1230,6 +1431,7 @@ impl AgentPanel {
                             .child(self.message_editor.clone()),
                     )
                     .child(clear_button)
+                    .child(sessions_button)
                     .child(selector_trigger)
                     .child(action_button),
             )
@@ -1286,6 +1488,97 @@ impl AgentPanel {
                     )
             }))
     }
+
+    fn render_sessions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let sessions = self.sessions.clone();
+
+        v_flex()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface_background)
+            .overflow_hidden()
+            .child(
+                Label::new("Sessions")
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .px_2()
+                    .py_1(),
+            )
+            .children(if sessions.is_empty() {
+                vec![
+                    Label::new("No saved sessions yet.")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .px_2()
+                        .py_1()
+                        .into_any_element(),
+                ]
+            } else {
+                sessions
+                    .into_iter()
+                    .map(|meta| self.render_session_row(meta, cx))
+                    .collect()
+            })
+    }
+
+    fn render_session_row(&mut self, meta: StoredSessionMeta, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.theme().colors();
+        let hover_color = colors.element_hover;
+        let id = meta.id.clone();
+        let open_row = h_flex()
+            .id(format!("agent-session-{id}"))
+            .flex_1()
+            .min_w_0()
+            .px_2()
+            .py_1()
+            .gap_1p5()
+            .hover(move |this| this.bg(hover_color))
+            .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                this.restore_session(id.clone(), cx);
+            }))
+            .child(
+                v_flex()
+                    .min_w_0()
+                    .gap_0p5()
+                    .child(
+                        Label::new(meta.title.clone())
+                            .size(LabelSize::Small)
+                            .color(Color::Default),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Label::new(meta.agent_id.clone())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(
+                                Label::new(format_relative_time(meta.updated_at))
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    ),
+            );
+
+        let delete_button = IconButton::new(format!("agent-session-delete-{id}"), IconName::Trash)
+            .shape(IconButtonShape::Square)
+            .tooltip(Tooltip::text("Delete session"))
+            .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                this.delete_session(id.clone(), cx);
+            }));
+
+        h_flex()
+            .w_full()
+            .items_center()
+            .child(open_row)
+            .child(delete_button)
+            .into_any_element()
+    }
+
+    fn render_empty_state(&self, cx: &App) -> AnyElement {
 }
 
 fn message_markdown_style(window: &Window, cx: &App) -> MarkdownStyle {

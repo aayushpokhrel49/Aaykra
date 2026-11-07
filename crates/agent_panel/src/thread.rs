@@ -8,6 +8,8 @@ use std::collections::HashMap;
 /// by id and resolved against the state map so a streaming update mutates the
 /// entry already shown instead of appending a new one.
 #[derive(Debug, Clone, PartialEq)]
+use serde::{Deserialize, Serialize};
+
 pub enum TimelineItem {
     UserMessage { content: String },
     AgentMessage { content: String },
@@ -33,6 +35,20 @@ pub struct PendingPermission {
     pub request: PermissionRequest,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PersistedItemKind {
+    User,
+    Agent,
+    Thought,
+    System,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PersistedItem {
+    pub kind: PersistedItemKind,
+    pub content: String,
+}
+
 #[derive(Default)]
 pub struct Thread {
     items: Vec<TimelineItem>,
@@ -56,6 +72,72 @@ impl Thread {
 
     pub fn current_mode_id(&self) -> Option<&str> {
         self.current_mode_id.as_deref()
+    }
+
+    /// Serializes the human-readable part of the conversation for storage.
+    /// Tool-call/plan state is intentionally not persisted; agents rebuild
+    /// it live when a session resumes.
+    pub fn export(&self) -> Vec<PersistedItem> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                TimelineItem::UserMessage { content } => Some(PersistedItem {
+                    kind: PersistedItemKind::User,
+                    content: content.clone(),
+                }),
+                TimelineItem::AgentMessage { content } => Some(PersistedItem {
+                    kind: PersistedItemKind::Agent,
+                    content: content.clone(),
+                }),
+                TimelineItem::AgentThought { content } => Some(PersistedItem {
+                    kind: PersistedItemKind::Thought,
+                    content: content.clone(),
+                }),
+                TimelineItem::System { content } => Some(PersistedItem {
+                    kind: PersistedItemKind::System,
+                    content: content.clone(),
+                }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Replays a previously stored conversation.
+    pub fn import(&mut self, items: Vec<PersistedItem>) {
+        for item in items {
+            match item.kind {
+                PersistedItemKind::User => self.push_user_message(item.content),
+                PersistedItemKind::System => self.push_system_message(item.content),
+                PersistedItemKind::Agent => {
+                    self.items
+                        .push(TimelineItem::AgentMessage { content: item.content });
+                }
+                PersistedItemKind::Thought => {
+                    self.items
+                        .push(TimelineItem::AgentThought { content: item.content });
+                }
+            }
+        }
+    }
+
+    /// Short title for the current conversation: derived from the first user
+    /// message so session listings are recognizable.
+    pub fn title(&self) -> String {
+        self.items
+            .iter()
+            .find_map(|item| match item {
+                TimelineItem::UserMessage { content } => Some(content.clone()),
+                _ => None,
+            })
+            .map(|content| {
+                let trimmed = content.trim();
+                if trimmed.len() > 60 {
+                    format!("{}…", &trimmed[..60])
+                } else {
+                    trimmed.to_string()
+                }
+            })
+            .unwrap_or_else(|| "New chat".to_string())
     }
 
     pub fn push_user_message(&mut self, content: String) {

@@ -1,6 +1,7 @@
 mod agents;
 mod api;
 mod panel;
+mod session_store;
 mod settings;
 mod thread;
 
