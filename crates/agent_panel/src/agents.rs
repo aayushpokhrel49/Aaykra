@@ -1,4 +1,5 @@
 use agent_acp::AgentSpawnConfig;
+use gpui::SharedString;
 use std::path::PathBuf;
 
 /// Best-effort preset for spawning a known ACP-speaking agent CLI. Presets
@@ -49,3 +50,27 @@ pub const BUILTIN_PROFILES: &[AgentProfile] = &[
         args: &["acp"],
     },
 ];
+
+/// Which agent the panel should talk to: a local ACP CLI or the user's own
+/// OpenAI-compatible API endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActiveAgent {
+    Builtin(&'static AgentProfile),
+    Api,
+}
+
+impl ActiveAgent {
+    pub fn id(&self) -> SharedString {
+        match self {
+            ActiveAgent::Builtin(profile) => profile.id.into(),
+            ActiveAgent::Api => "api".into(),
+        }
+    }
+
+    pub fn label(&self) -> SharedString {
+        match self {
+            ActiveAgent::Builtin(profile) => profile.label.into(),
+            ActiveAgent::Api => "Custom API".into(),
+        }
+    }
+}

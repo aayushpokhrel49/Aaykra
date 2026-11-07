@@ -990,6 +990,18 @@
     //
     // Default: false
     "starts_open": false,
+    // Base URL of your own OpenAI-compatible API.
+    //
+    // Default: https://api.openai.com/v1
+    "api_url": "https://api.openai.com/v1",
+    // API key for your own OpenAI-compatible API.
+    //
+    // Default: empty
+    "api_key": "",
+    // Model name for your own OpenAI-compatible API.
+    //
+    // Default: gpt-4o-mini
+    "model": "gpt-4o-mini",
   },
   "git_panel": {
     // Whether to show the git panel button in the status bar.

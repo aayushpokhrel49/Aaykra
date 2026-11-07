@@ -15,15 +15,17 @@ use gpui::{
 use language::Buffer;
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
 use settings::{Settings, update_settings_file};
+use std::sync::atomic::{AtomicBool, Ordering};
 use theme::ActiveTheme as _;
 use ui::{IconButton, IconButtonShape, SpinnerLabel, Tooltip, prelude::*};
 use workspace::{
-    HideStatusItem, Workspace,
+    HideStatusItem, StatusItemView, Workspace,
     dock::{DockPosition, Panel, PanelEvent},
 };
 
 use crate::{
-    agents::{AgentProfile, BUILTIN_PROFILES},
+    agents::{ActiveAgent, AgentProfile, BUILTIN_PROFILES},
+    api::{ApiConfig, stream_chat},
     settings::AgentPanelSettings,
     thread::{PendingPermission, Thread, TimelineItem},
 };
@@ -80,6 +82,9 @@ pub struct AgentPanel {
     turn_task: Option<Task<()>>,
     status: ConnectionState,
     pending_first_message: Option<String>,
+    active_agent: ActiveAgent,
+    show_agent_selector: bool,
+    api_cancel: Arc<AtomicBool>,
 }
 
 impl AgentPanel {
@@ -128,6 +133,9 @@ impl AgentPanel {
             turn_task: None,
             status: ConnectionState::Idle,
             pending_first_message: None,
+            active_agent: ActiveAgent::Builtin(&BUILTIN_PROFILES[0]),
+            show_agent_selector: false,
+            api_cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -187,7 +195,15 @@ impl AgentPanel {
                     driver,
                 }) => (agent, events, driver),
                 Err(error) => {
-                    Self::mark_failed(this, format!("{error}"), cx);
+                    let message = if error.to_string().contains("No such file") {
+                        format!(
+                            "Could not start {label}: {error}\nMake sure `{}` is installed and on your PATH.",
+                            profile.command
+                        )
+                    } else {
+                        format!("Could not start {label}: {error}")
+                    };
+                    Self::mark_failed(this, message, cx);
                     return;
                 }
             };
@@ -294,6 +310,7 @@ impl AgentPanel {
                             let item_index =
                                 self.thread.stream_agent_message_chunk(text.to_string());
                             self.stream_markdown(item_index, text, cx);
+                            self.scroll_handle.scroll_to_bottom();
                         }
                     }
                     SessionUpdate::AgentThoughtChunk { content } => {
@@ -301,6 +318,7 @@ impl AgentPanel {
                             let item_index =
                                 self.thread.stream_agent_thought_chunk(text.to_string());
                             self.stream_markdown(item_index, text, cx);
+                            self.scroll_handle.scroll_to_bottom();
                         }
                     }
                     _ => {}
@@ -360,8 +378,56 @@ impl AgentPanel {
             ConnectionState::Starting { label }
             | ConnectionState::Running { label }
             | ConnectionState::Working { label } => label.clone(),
-            ConnectionState::Idle | ConnectionState::Failed { .. } => "agent".into(),
+            ConnectionState::Idle | ConnectionState::Failed { .. } => self.active_agent.label(),
         }
+    }
+
+    /// Runs a turn against the user's own OpenAI-compatible endpoint. Deltas
+    /// stream into the same timeline as ACP agent output.
+    fn run_api_turn(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let http = workspace.read(cx).app_state().client.http_client();
+        let settings = AgentPanelSettings::get_global(cx);
+        let config = ApiConfig {
+            base_url: settings.api_url.clone(),
+            api_key: settings.api_key.clone(),
+            model: settings.model.clone(),
+        };
+        if config.base_url.is_empty() || config.api_key.is_empty() {
+            self.push_system_message(
+                "Custom API needs a base URL and API key. Set agent_panel.api_url and agent_panel.api_key in your settings.",
+                cx,
+            );
+            return;
+        }
+        let label = self.active_label();
+        self.status = ConnectionState::Working { label: label.clone() };
+        self.api_cancel.store(false, Ordering::Relaxed);
+        let cancel = self.api_cancel.clone();
+        self.turn_task = Some(cx.spawn(async move |this, cx| {
+            let messages = vec![("user".to_string(), text)];
+            let result = stream_chat(http, config, &messages, &cancel, |delta| {
+                this.update(cx, |this, cx| {
+                    if let Some(index) = this.thread.stream_agent_message_chunk(delta.to_string()) {
+                        this.stream_markdown(Some(index), delta, cx);
+                    }
+                    this.scroll_handle.scroll_to_bottom();
+                    cx.notify();
+                })
+                .ok();
+            })
+            .await;
+            this.update(cx, |this, cx| {
+                this.status = ConnectionState::Running { label: label.clone() };
+                if let Err(error) = result {
+                    this.push_system_message(format!("API request failed: {error:#}"), cx);
+                }
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     // Actions -------------------------------------------------------------
@@ -374,28 +440,35 @@ impl AgentPanel {
         self.message_buffer
             .update(cx, |message_buffer, cx| message_buffer.set_text("", cx));
 
-        match &self.status {
-            ConnectionState::Running { .. } | ConnectionState::Working { .. } => {
-                self.thread.push_user_message(text.clone());
-                self.turn(vec![ContentBlock::text(text)], cx);
+        self.thread.push_user_message(text.clone());
+        cx.notify();
+
+        match self.active_agent {
+            ActiveAgent::Builtin(profile) => {
+                match &self.status {
+                    ConnectionState::Running { .. } | ConnectionState::Working { .. } => {
+                        self.turn(vec![ContentBlock::text(text)], cx);
+                    }
+                    ConnectionState::Starting { .. } => {
+                        self.pending_first_message = Some(text);
+                    }
+                    ConnectionState::Idle | ConnectionState::Failed { .. } => {
+                        self.pending_first_message = Some(text);
+                        self.start_agent(profile, cx);
+                    }
+                }
             }
-            ConnectionState::Starting { .. } => {
-                self.thread.push_user_message(text.clone());
-                self.pending_first_message = Some(text);
-            }
-            ConnectionState::Idle | ConnectionState::Failed { .. } => {
-                self.thread.push_user_message(text.clone());
-                self.pending_first_message = Some(text);
-                self.start_agent(&BUILTIN_PROFILES[0], cx);
+            ActiveAgent::Api => {
+                self.run_api_turn(text, cx);
             }
         }
-        cx.notify();
     }
 
     fn cancel_run(&mut self, _: &CancelRun, _: &mut Window, _cx: &mut Context<Self>) {
         if let Some(session) = &self.session {
             session.cancel();
         }
+        self.api_cancel.store(true, Ordering::Relaxed);
     }
 
     fn allow_once(&mut self, _: &AllowOnce, _: &mut Window, cx: &mut Context<Self>) {
@@ -522,6 +595,50 @@ impl Focusable for AgentPanel {
     }
 }
 
+/// Status-bar button that toggles the agent panel, placed alongside the
+/// language / terminal indicators in the workspace footer.
+pub struct AgentPanelStatusItem {
+    workspace: WeakEntity<Workspace>,
+}
+
+impl AgentPanelStatusItem {
+    pub fn new(workspace: WeakEntity<Workspace>) -> Self {
+        Self { workspace }
+    }
+}
+
+impl Render for AgentPanelStatusItem {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        IconButton::new("agent-panel-status", IconName::Sparkle)
+            .tooltip(Tooltip::text("Agent Panel (Ctrl+Shift+A)"))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                if let Some(workspace) = this.workspace.upgrade() {
+                    workspace
+                        .update_in(window, cx, |workspace, window, cx| {
+                            workspace.toggle_panel_focus::<AgentPanel>(window, cx);
+                        })
+                        .ok();
+                }
+            }))
+    }
+}
+
+impl StatusItemView for AgentPanelStatusItem {
+    fn set_active_pane_item(
+        &mut self,
+        _active_pane_item: Option<&dyn workspace::ItemHandle>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
+        Some(HideStatusItem::new(|settings| {
+            settings.agent_panel.get_or_insert_default().button = Some(false);
+        }))
+    }
+}
+
 impl EventEmitter<PanelEvent> for AgentPanel {}
 
 impl Panel for AgentPanel {
@@ -546,7 +663,10 @@ impl Panel for AgentPanel {
     }
 
     fn position_is_valid(&self, position: DockPosition) -> bool {
-        matches!(position, DockPosition::Left | DockPosition::Right)
+        matches!(
+            position,
+            DockPosition::Left | DockPosition::Right | DockPosition::Bottom
+        )
     }
 
     fn set_position(&mut self, position: DockPosition, _: &mut Window, cx: &mut Context<Self>) {
@@ -655,26 +775,14 @@ impl AgentPanel {
             ConnectionState::Working { label } => {
                 bar = bar.child(self.render_connected_row(label.clone(), true, cx));
             }
-            ConnectionState::Idle | ConnectionState::Failed { .. } => {
-                let mut prompt = v_flex().gap_1();
-                if let ConnectionState::Failed { error } = &state {
-                    prompt = prompt.child(
-                        Label::new(error.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Error),
-                    );
-                }
-                prompt = prompt.child(h_flex().gap_1().flex_wrap().children(
-                    BUILTIN_PROFILES.iter().map(|profile| {
-                        Button::new(SharedString::from(profile.id), profile.label)
-                            .label_size(LabelSize::Small)
-                            .on_click(cx.listener({
-                                move |this: &mut Self, _, _, cx| this.start_agent(profile, cx)
-                            }))
-                    }),
-                ));
-                bar = bar.child(prompt);
+            ConnectionState::Failed { error } => {
+                bar = bar.child(
+                    Label::new(error.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Error),
+                );
             }
+            ConnectionState::Idle => {}
         }
         bar
     }
@@ -944,7 +1052,7 @@ impl AgentPanel {
             }))
     }
 
-    fn render_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_input(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let working = matches!(self.status, ConnectionState::Working { .. });
         let action_button = if working {
@@ -961,32 +1069,88 @@ impl AgentPanel {
                 }))
         };
 
-        h_flex()
+        let selector_trigger = Button::new("agent-selector", self.active_agent.label())
+            .label_size(LabelSize::Small)
+            .tooltip(Tooltip::text("Choose agent"))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                this.show_agent_selector = !this.show_agent_selector;
+                cx.notify();
+            }));
+
+        v_flex()
             .flex_shrink_0()
-            .items_end()
             .px_2()
-            .py_2()
+            .pb_2()
             .gap_1p5()
-            .border_t_1()
-            .border_color(colors.border)
+            .when(self.show_agent_selector, |this| {
+                this.child(self.render_agent_selector(cx))
+            })
             .child(
-                div()
-                    .id("agent-input")
-                    .key_context("AgentInputEditor")
-                    .flex_1()
-                    .min_w_0()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(colors.border)
-                    .bg(colors.editor_background)
-                    .w_full()
-                    .px_1p5()
-                    .py_0p5()
-                    .max_h_24()
-                    .overflow_y_scroll()
-                    .child(self.message_editor.clone()),
+                h_flex()
+                    .items_end()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .id("agent-input")
+                            .key_context("AgentInputEditor")
+                            .flex_1()
+                            .min_w_0()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.editor_background)
+                            .w_full()
+                            .px_1p5()
+                            .py_0p5()
+                            .max_h_24()
+                            .overflow_y_scroll()
+                            .child(self.message_editor.clone()),
+                    )
+                    .child(selector_trigger)
+                    .child(action_button),
             )
-            .child(action_button)
+    }
+
+    fn render_agent_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let hover_color = colors.element_hover;
+        let mut agents: Vec<ActiveAgent> = BUILTIN_PROFILES
+            .iter()
+            .map(|profile| ActiveAgent::Builtin(profile))
+            .collect();
+        agents.push(ActiveAgent::Api);
+
+        v_flex()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface_background)
+            .overflow_hidden()
+            .children(agents.into_iter().map(|agent| {
+                let active = self.active_agent == agent;
+                h_flex()
+                    .id(format!("agent-select-{}", agent.id()))
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_1p5()
+                    .hover(move |this| this.bg(hover_color))
+                    .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                        this.active_agent = agent;
+                        this.show_agent_selector = false;
+                        cx.notify();
+                    }))
+                    .child(
+                        Icon::new(IconName::Check)
+                            .size(IconSize::Small)
+                            .color(if active { Color::Accent } else { Color::Muted }),
+                    )
+                    .child(
+                        Label::new(agent.label())
+                            .size(LabelSize::Small)
+                            .color(if active { Color::Default } else { Color::Muted }),
+                    )
+            }))
     }
 }
 

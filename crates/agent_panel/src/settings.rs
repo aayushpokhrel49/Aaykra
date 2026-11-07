@@ -8,6 +8,9 @@ pub struct AgentPanelSettings {
     pub dock: DockPosition,
     pub default_width: Pixels,
     pub starts_open: bool,
+    pub api_url: String,
+    pub api_key: String,
+    pub model: String,
 }
 
 impl Settings for AgentPanelSettings {
@@ -18,6 +21,9 @@ impl Settings for AgentPanelSettings {
             dock: agent_panel.dock.unwrap().into(),
             default_width: agent_panel.default_width.unwrap().into_gpui(),
             starts_open: agent_panel.starts_open.unwrap(),
+            api_url: agent_panel.api_url.clone().unwrap_or_default(),
+            api_key: agent_panel.api_key.clone().unwrap_or_default(),
+            model: agent_panel.model.clone().unwrap_or_default(),
         }
     }
 }

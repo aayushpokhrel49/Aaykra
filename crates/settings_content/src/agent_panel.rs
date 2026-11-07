@@ -14,7 +14,7 @@ pub struct AgentPanelSettingsContent {
 
     /// Where to dock the agent panel.
     ///
-    /// Default: right
+    /// Default: bottom (beside the terminal panel)
     pub dock: Option<DockPosition>,
 
     /// Default width of the panel in pixels.
@@ -26,4 +26,19 @@ pub struct AgentPanelSettingsContent {
     ///
     /// Default: false
     pub starts_open: Option<bool>,
+
+    /// Base URL of the user's own OpenAI-compatible API.
+    ///
+    /// Default: https://api.openai.com/v1
+    pub api_url: Option<String>,
+
+    /// API key used for the user's own OpenAI-compatible API.
+    ///
+    /// Default: empty
+    pub api_key: Option<String>,
+
+    /// Model name used for the user's own OpenAI-compatible API.
+    ///
+    /// Default: gpt-4o-mini
+    pub model: Option<String>,
 }
