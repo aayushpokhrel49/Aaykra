@@ -25,7 +25,7 @@ use workspace::{
 
 use crate::{
     agents::{ActiveAgent, AgentProfile, BUILTIN_PROFILES},
-    api::{ApiConfig, stream_chat},
+    api::{ApiConfig, fetch_models, stream_chat},
     panel::AgentPanelStatusItem,
     session_store::{
         StoredSessionMeta, delete_session, load_body, load_index, new_session_id, now_unix_secs,
@@ -97,6 +97,9 @@ pub struct AgentPanel {
     session_id: Option<String>,
     session_autosave: Option<Task<()>>,
     show_sessions: bool,
+    api_models: Vec<String>,
+    show_model_selector: bool,
+    model_selection_task: Option<Task<()>>,
 }
 
 impl AgentPanel {
@@ -153,6 +156,9 @@ impl AgentPanel {
             session_id: None,
             session_autosave: None,
             show_sessions: false,
+            api_models: Vec::new(),
+            show_model_selector: false,
+            model_selection_task: None,
         });
 
         panel
@@ -1386,8 +1392,32 @@ impl AgentPanel {
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                 this.show_sessions = !this.show_sessions;
                 this.show_agent_selector = false;
+                this.show_model_selector = false;
                 cx.notify();
             }));
+
+        let is_api = matches!(self.active_agent, ActiveAgent::Api);
+        let model_button = is_api.then(|| {
+            let current = AgentPanelSettings::get_global(cx).model;
+            Button::new(
+                "agent-model-selector",
+                if current.is_empty() {
+                    SharedString::from("Model")
+                } else {
+                    SharedString::from(current)
+                },
+            )
+            .label_size(LabelSize::Small)
+            .tooltip(Tooltip::text("Choose model"))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                this.show_model_selector = !this.show_model_selector;
+                if this.show_model_selector && this.api_models.is_empty() {
+                    this.load_api_models(cx);
+                }
+                this.show_agent_selector = false;
+                cx.notify();
+            }))
+        });
 
         let selector_trigger = Button::new("agent-selector", self.active_agent.label())
             .label_size(LabelSize::Small)
@@ -1408,6 +1438,9 @@ impl AgentPanel {
             })
             .when(self.show_sessions, |this| {
                 this.child(self.render_sessions(cx))
+            })
+            .when(self.show_model_selector, |this| {
+                this.child(self.render_model_selector(cx))
             })
             .child(
                 h_flex()
@@ -1432,6 +1465,7 @@ impl AgentPanel {
                     )
                     .child(clear_button)
                     .child(sessions_button)
+                    .when_some(model_button, |this, button| this.child(button))
                     .child(selector_trigger)
                     .child(action_button),
             )
@@ -1465,6 +1499,7 @@ impl AgentPanel {
                         let switching = this.active_agent != agent;
                         this.active_agent = agent;
                         this.show_agent_selector = false;
+                        this.show_model_selector = false;
                         if switching
                             && !matches!(
                                 this.status,
@@ -1523,8 +1558,110 @@ impl AgentPanel {
             })
     }
 
-    fn render_session_row(&mut self, meta: StoredSessionMeta, cx: &mut Context<Self>) -> AnyElement {
+    fn load_api_models(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let http = workspace.read(cx).app_state().client.http_client();
+        let settings = AgentPanelSettings::get_global(cx);
+        let config = ApiConfig {
+            base_url: settings.api_url.clone(),
+            api_key: settings.api_key.clone(),
+            model: settings.model.clone(),
+        };
+        if config.base_url.is_empty() {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            match fetch_models(http, &config).await {
+                Ok(models) => {
+                    this.update(cx, |this, cx| {
+                        this.api_models = models;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.push_system_message(format!("Could not load models: {error:#}"), cx);
+                    })
+                    .ok();
+                }
+            }
+        });
+        self.model_selection_task = Some(task);
+    }
+
+    fn render_model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
+        let hover_color = colors.element_hover;
+        let current = AgentPanelSettings::get_global(cx).model;
+        let fs = self.fs.clone();
+
+        v_flex()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface_background)
+            .overflow_hidden()
+            .children(if self.api_models.is_empty() {
+                vec![
+                    Label::new("No models loaded. Check your API URL and key.")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .px_2()
+                        .py_1()
+                        .into_any_element(),
+                ]
+            } else {
+                self.api_models
+                    .iter()
+                    .map(|model| {
+                        let active = *model == current;
+                        let model = model.clone();
+                        let fs = fs.clone();
+                        h_flex()
+                            .id(format!("agent-model-{model}"))
+                            .w_full()
+                            .px_2()
+                            .py_1()
+                            .gap_1p5()
+                            .hover(move |this| this.bg(hover_color))
+                            .on_click(cx.listener(
+                                move |this: &mut Self, _, _, cx| {
+                                    update_settings_file(fs, cx, move |settings, _| {
+                                        settings.agent_panel.get_or_insert_default().model =
+                                            Some(model.clone());
+                                    });
+                                    this.show_model_selector = false;
+                                    cx.notify();
+                                },
+                            ))
+                            .child(
+                                Icon::new(IconName::Check)
+                                    .size(IconSize::Small)
+                                    .color(if active {
+                                        Color::Accent
+                                    } else {
+                                        Color::Muted
+                                    }),
+                            )
+                            .child(
+                                Label::new(model)
+                                    .size(LabelSize::Small)
+                                    .color(if active {
+                                        Color::Default
+                                    } else {
+                                        Color::Muted
+                                    }),
+                            )
+                            .into_any_element()
+                    })
+                    .collect()
+            })
+    }
+
+    fn render_session_row(&mut self, meta: StoredSessionMeta, cx: &mut Context<Self>) -> AnyElement {        let colors = cx.theme().colors();
         let hover_color = colors.element_hover;
         let id = meta.id.clone();
         let open_row = h_flex()
