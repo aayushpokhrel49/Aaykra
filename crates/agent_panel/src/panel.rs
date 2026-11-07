@@ -43,6 +43,8 @@ actions!(
         SendPrompt,
         /// Stops the current agent turn.
         CancelRun,
+        /// Clears the conversation and disconnects the agent.
+        ClearConversation,
         /// Approves the pending permission request once.
         AllowOnce,
         /// Approves the pending permission request for the rest of the session.
@@ -85,6 +87,7 @@ pub struct AgentPanel {
     active_agent: ActiveAgent,
     show_agent_selector: bool,
     api_cancel: Arc<AtomicBool>,
+    last_agent: Option<ActiveAgent>,
 }
 
 impl AgentPanel {
@@ -136,6 +139,7 @@ impl AgentPanel {
             active_agent: ActiveAgent::Builtin(&BUILTIN_PROFILES[0]),
             show_agent_selector: false,
             api_cancel: Arc::new(AtomicBool::new(false)),
+            last_agent: None,
         })
     }
 
@@ -181,6 +185,7 @@ impl AgentPanel {
         self.status = ConnectionState::Starting {
             label: profile.label.into(),
         };
+        self.last_agent = Some(ActiveAgent::Builtin(profile));
         self.teardown_agent(cx);
         cx.notify();
 
@@ -404,6 +409,7 @@ impl AgentPanel {
         }
         let label = self.active_label();
         self.status = ConnectionState::Working { label: label.clone() };
+        self.last_agent = Some(ActiveAgent::Api);
         self.api_cancel.store(false, Ordering::Relaxed);
         let cancel = self.api_cancel.clone();
         self.turn_task = Some(cx.spawn(async move |this, cx| {
@@ -536,6 +542,26 @@ impl AgentPanel {
         self.teardown_agent(cx);
         self.status = ConnectionState::Idle;
         cx.notify();
+    }
+
+    fn clear_conversation(&mut self, _: &ClearConversation, _: &mut Window, cx: &mut Context<Self>) {
+        self.teardown_agent(cx);
+        self.thread = Thread::default();
+        self.markdown_by_item.clear();
+        self.pending_first_message = None;
+        self.status = ConnectionState::Idle;
+        self.api_cancel.store(true, Ordering::Relaxed);
+        cx.notify();
+    }
+
+    fn retry_last_agent(&mut self, cx: &mut Context<Self>) {
+        match self.last_agent {
+            Some(ActiveAgent::Builtin(profile)) => self.start_agent(profile, cx),
+            Some(ActiveAgent::Api) | None => {
+                self.status = ConnectionState::Idle;
+                cx.notify();
+            }
+        }
     }
 }
 
@@ -737,7 +763,11 @@ impl Render for AgentPanel {
                             .px_2()
                             .py_2()
                             .gap_2()
-                            .children(self.render_timeline(window, cx)),
+                            .children(if self.thread.timeline().is_empty() {
+                                vec![self.render_empty_state(cx)]
+                            } else {
+                                self.render_timeline(window, cx)
+                            }),
                     ),
             )
             .child(self.render_permissions(cx))
@@ -777,9 +807,35 @@ impl AgentPanel {
             }
             ConnectionState::Failed { error } => {
                 bar = bar.child(
-                    Label::new(error.clone())
-                        .size(LabelSize::Small)
-                        .color(Color::Error),
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            Label::new(error.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Error),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_1()
+                                .child(
+                                    Button::new("agent-retry", "Retry")
+                                        .label_size(LabelSize::Small)
+                                        .color(Color::Accent)
+                                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                            this.retry_last_agent(cx)
+                                        })),
+                                )
+                                .child(
+                                    Button::new("agent-switch", "Switch agent")
+                                        .label_size(LabelSize::Small)
+                                        .on_click(cx.listener(
+                                            |this, _: &gpui::ClickEvent, _, cx| {
+                                                this.show_agent_selector = true;
+                                                cx.notify();
+                                            },
+                                        )),
+                                ),
+                        ),
                 );
             }
             ConnectionState::Idle => {}
@@ -837,11 +893,16 @@ impl AgentPanel {
             .flat_map(|(index, item)| {
                 let elements: Vec<AnyElement> = match item {
                     TimelineItem::UserMessage { content } => {
-                        vec![self.render_user_message(content, cx)]
+                        vec![self.render_user_message(index, content, cx)]
                     }
                     TimelineItem::AgentMessage { .. } | TimelineItem::AgentThought { .. } => {
                         let Some(markdown) = self.markdown_by_item.get(&index) else {
                             return Vec::new();
+                        };
+                        let content = match item {
+                            TimelineItem::AgentMessage { content }
+                            | TimelineItem::AgentThought { content } => content.clone(),
+                            _ => String::new(),
                         };
                         let style = match item {
                             TimelineItem::AgentThought { .. } => {
@@ -853,15 +914,25 @@ impl AgentPanel {
                             .w_full()
                             .max_w_full()
                             .child(MarkdownElement::new(markdown.clone(), style));
+                        let message_container = v_flex()
+                            .w_full()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .justify_end()
+                                    .child(self.render_copy_button(index, content)),
+                            )
+                            .child(message);
                         match item {
                             TimelineItem::AgentThought { .. } => vec![
                                 Label::new("Thought")
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted)
                                     .into_any_element(),
-                                message.into_any_element(),
+                                message_container.into_any_element(),
                             ],
-                            _ => vec![message.into_any_element()],
+                            _ => vec![message_container.into_any_element()],
                         }
                     }
                     TimelineItem::ToolCall { tool_call_id } => {
@@ -885,14 +956,20 @@ impl AgentPanel {
             .collect()
     }
 
-    fn render_user_message(&self, content: &str, cx: &App) -> AnyElement {
+    fn render_user_message(&self, index: usize, content: &str, cx: &App) -> AnyElement {
         let colors = cx.theme().colors();
         v_flex()
             .gap_0p5()
             .child(
-                Label::new("You")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
+                h_flex()
+                    .w_full()
+                    .justify_between()
+                    .child(
+                        Label::new("You")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .child(self.render_copy_button(index, content.to_string())),
             )
             .child(
                 div()
@@ -903,6 +980,46 @@ impl AgentPanel {
                     .py_1p5()
                     .text_color(colors.editor_foreground)
                     .child(content.to_string()),
+            )
+            .into_any_element()
+    }
+
+    fn render_copy_button(&self, index: usize, content: String) -> impl IntoElement {
+        IconButton::new(format!("agent-copy-{index}"), IconName::Copy)
+            .shape(IconButtonShape::Square)
+            .tooltip(Tooltip::text("Copy"))
+            .on_click(move |_, _window, cx: &mut App| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(content.clone()));
+            })
+    }
+
+    fn render_empty_state(&self, cx: &App) -> AnyElement {
+        let colors = cx.theme().colors();
+        v_flex()
+            .w_full()
+            .h_full()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .child(
+                Icon::new(IconName::Sparkle)
+                    .size(IconSize::XLarge)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new("Ask anything")
+                    .size(LabelSize::Large)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new("Pick an agent next to the input, then type your question.")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                Label::new("Ctrl+Shift+A toggles this panel")
+                    .size(LabelSize::XSmall)
+                    .color(colors.text_muted),
             )
             .into_any_element()
     }
@@ -1069,6 +1186,12 @@ impl AgentPanel {
                 }))
         };
 
+        let clear_button = IconButton::new("agent-clear", IconName::Trash)
+            .tooltip(Tooltip::text("Clear conversation"))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                this.clear_conversation(&ClearConversation, window, cx)
+            }));
+
         let selector_trigger = Button::new("agent-selector", self.active_agent.label())
             .label_size(LabelSize::Small)
             .tooltip(Tooltip::text("Choose agent"))
@@ -1106,6 +1229,7 @@ impl AgentPanel {
                             .overflow_y_scroll()
                             .child(self.message_editor.clone()),
                     )
+                    .child(clear_button)
                     .child(selector_trigger)
                     .child(action_button),
             )
@@ -1136,8 +1260,18 @@ impl AgentPanel {
                     .gap_1p5()
                     .hover(move |this| this.bg(hover_color))
                     .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                        let switching = this.active_agent != agent;
                         this.active_agent = agent;
                         this.show_agent_selector = false;
+                        if switching
+                            && !matches!(
+                                this.status,
+                                ConnectionState::Idle | ConnectionState::Failed { .. }
+                            )
+                        {
+                            this.teardown_agent(cx);
+                            this.status = ConnectionState::Idle;
+                        }
                         cx.notify();
                     }))
                     .child(
