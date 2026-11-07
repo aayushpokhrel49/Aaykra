@@ -5,6 +5,8 @@ members = [
     "crates/aaykra_actions",
     "crates/aaykra_env_vars",
     "crates/activity_indicator",
+    "crates/agent_acp",
+    "crates/agent_panel",
     "crates/askpass",
     "crates/assets",
     "crates/auto_update",
@@ -192,6 +194,8 @@ edition = "2024"
 [workspace.dependencies]
 aaykra_actions = { path = "crates/aaykra_actions" }
 aaykra_env_vars = { path = "crates/aaykra_env_vars" }
+agent_acp = { path = "crates/agent_acp" }
+agent_panel = { path = "crates/agent_panel" }
 
 #
 # Workspace member crates

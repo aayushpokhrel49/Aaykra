@@ -9,6 +9,7 @@ dependencies = [
  "aaykra_actions",
  "aaykra_env_vars",
  "activity_indicator",
+ "agent_panel",
  "anyhow",
  "ashpd",
  "askpass",
@@ -301,6 +302,42 @@ dependencies = [
  "cipher",
  "cpufeatures 0.2.17",
  "zeroize",
+]
+
+[[package]]
+name = "agent_acp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "gpui_util",
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "smol",
+ "util",
+]
+
+[[package]]
+name = "agent_panel"
+version = "0.1.0"
+dependencies = [
+ "agent_acp",
+ "anyhow",
+ "editor",
+ "fs",
+ "futures",
+ "gpui",
+ "language",
+ "log",
+ "markdown",
+ "serde_json",
+ "settings",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]

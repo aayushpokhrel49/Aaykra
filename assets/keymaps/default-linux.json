@@ -481,6 +481,7 @@
       "ctrl-shift-e": "project_panel::ToggleFocus",
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
+      "ctrl-shift-a": "agent_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
@@ -726,6 +727,14 @@
     "bindings": {
       "ctrl-1": "git_panel::ActivateChangesTab",
       "ctrl-2": "git_panel::ActivateHistoryTab",
+    },
+  },
+  {
+    "context": "AgentPanel > Editor",
+    "bindings": {
+      "enter": "agent_panel::SendPrompt",
+      "alt-enter": "editor::Newline",
+      "shift-enter": "editor::Newline",
     },
   },
   {

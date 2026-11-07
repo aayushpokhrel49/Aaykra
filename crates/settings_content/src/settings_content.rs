@@ -1,4 +1,5 @@
 mod action;
+mod agent_panel;
 mod editor;
 mod extension;
 mod fallible_options;
@@ -13,6 +14,7 @@ mod workspace;
 
 pub use action::{ActionName, ActionWithArguments, CommandAliasTarget};
 use anyhow::Context;
+pub use agent_panel::*;
 pub use editor::*;
 pub use extension::*;
 pub use fallible_options::*;
@@ -245,6 +247,8 @@ pub struct SettingsContent {
 
     pub outline_panel: Option<OutlinePanelSettingsContent>,
 
+    pub agent_panel: Option<AgentPanelSettingsContent>,
+
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
     pub search_panel: Option<SearchPanelSettingsContent>,
@@ -322,7 +326,8 @@ impl SettingsContent {
 fallible_options::flattened_deserialize!(SettingsContent {
     sections: { project, theme, extension, workspace, editor, remote },
     options: {
-        call_hierarchy, file_finder, git_panel, tabs, tab_bar, status_bar, activity_bar, preview_tabs,
+        agent_panel, call_hierarchy, file_finder, git_panel, tabs, tab_bar, status_bar, activity_bar,
+        preview_tabs,
         auto_update, base_keymap, debugger, diagnostics,
         git,
         global_lsp_settings, image_viewer, markdown_preview, hide_mouse,
