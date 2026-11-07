@@ -1940,8 +1940,6 @@ impl AgentPanel {
             .child(delete_button)
             .into_any_element()
     }
-
-    fn render_empty_state(&self, cx: &App) -> AnyElement {
 }
 
 fn message_markdown_style(window: &Window, cx: &App) -> MarkdownStyle {
