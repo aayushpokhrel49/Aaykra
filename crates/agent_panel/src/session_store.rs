@@ -52,8 +52,11 @@ pub async fn save_session(
         metas.push(meta.clone());
     }
     metas.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    fs.write(&dir.join("index.json"), serde_json::to_vec(&metas)?.as_slice())
-        .await?;
+    fs.write(
+        &dir.join("index.json"),
+        serde_json::to_vec(&metas)?.as_slice(),
+    )
+    .await?;
 
     fs.write(
         &dir.join(format!("session_{}.json", meta.id)),
@@ -63,35 +66,30 @@ pub async fn save_session(
     Ok(())
 }
 
-pub async fn load_index(
-    fs: Arc<dyn Fs>,
-    dir: &Path,
-) -> anyhow::Result<Vec<StoredSessionMeta>> {
+pub async fn load_index(fs: Arc<dyn Fs>, dir: &Path) -> anyhow::Result<Vec<StoredSessionMeta>> {
     let data = read_string(fs, &dir.join("index.json")).await?;
     Ok(serde_json::from_str(&data)?)
 }
 
-pub async fn load_body(
-    fs: Arc<dyn Fs>,
-    dir: &Path,
-    id: &str,
-) -> anyhow::Result<String> {
+pub async fn load_body(fs: Arc<dyn Fs>, dir: &Path, id: &str) -> anyhow::Result<String> {
     read_string(fs, &dir.join(format!("session_{id}.json"))).await
 }
 
-pub async fn delete_session(
-    fs: Arc<dyn Fs>,
-    dir: &Path,
-    id: &str,
-) -> anyhow::Result<()> {
+pub async fn delete_session(fs: Arc<dyn Fs>, dir: &Path, id: &str) -> anyhow::Result<()> {
     let _ = fs
-        .remove_file(&dir.join(format!("session_{id}.json")), RemoveOptions::default())
+        .remove_file(
+            &dir.join(format!("session_{id}.json")),
+            RemoveOptions::default(),
+        )
         .await;
     let metas = load_index(fs.clone(), dir).await.unwrap_or_default();
     let remaining: Vec<StoredSessionMeta> =
         metas.into_iter().filter(|entry| entry.id != id).collect();
-    fs.write(&dir.join("index.json"), serde_json::to_vec(&remaining)?.as_slice())
-        .await?;
+    fs.write(
+        &dir.join("index.json"),
+        serde_json::to_vec(&remaining)?.as_slice(),
+    )
+    .await?;
     Ok(())
 }
 

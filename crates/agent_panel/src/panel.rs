@@ -2,18 +2,19 @@ use std::{path::PathBuf, sync::Arc};
 
 use agent_acp::{
     AcpAgent, AcpEvent, AcpSession, AgentSpawnConfig, ClientCapabilities, ContentBlock, MessageId,
-    PermissionOutcome, PlanEntry, SessionUpdate, StopReason,
+    PermissionOutcome, PlanEntry, SessionUpdate, StopReason, ToolCallUpdate,
 };
 use editor::{Editor, EditorMode, MultiBuffer};
 use fs::Fs;
 use futures::StreamExt as _;
 use gpui::{
-    actions, App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter,
-    Focusable, ScrollHandle, SharedString, Task, TextStyleRefinement, WeakEntity, Window, div,
+    App, AppContext as _, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter, Focusable,
+    ScrollHandle, SharedString, Task, TextStyleRefinement, WeakEntity, Window, actions, div,
     prelude::*,
 };
 use language::Buffer;
 use markdown::{Markdown, MarkdownElement, MarkdownStyle};
+use serde_json::Value;
 use settings::{Settings, update_settings_file};
 use std::sync::atomic::{AtomicBool, Ordering};
 use theme::ActiveTheme as _;
@@ -25,13 +26,16 @@ use workspace::{
 
 use crate::{
     agents::{ActiveAgent, AgentProfile, BUILTIN_PROFILES},
-    api::{ApiConfig, fetch_models, stream_chat},
+    api::{
+        ApiConfig, MAX_HISTORY_ITEMS, ToolCallPhase, ToolHost, TurnEvent, fetch_models,
+        history_message, run_agent_turn,
+    },
     session_store::{
         StoredSessionMeta, delete_session, load_body, load_index, new_session_id, now_unix_secs,
         save_session, sessions_dir,
     },
     settings::AgentPanelSettings,
-    thread::{PendingPermission, PersistedItem, Thread, TimelineItem},
+    thread::{PendingPermission, PersistedItem, PersistedItemKind, Thread, TimelineItem},
 };
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
@@ -363,7 +367,10 @@ impl AgentPanel {
                 }
                 cx.notify();
             }
-            AcpEvent::PermissionRequest { request_id, request } => {
+            AcpEvent::PermissionRequest {
+                request_id,
+                request,
+            } => {
                 self.thread.queue_permission(request_id, request);
                 cx.notify();
             }
@@ -420,10 +427,19 @@ impl AgentPanel {
         }
     }
 
-    /// Runs a turn against the user's own OpenAI-compatible endpoint. Deltas
-    /// stream into the same timeline as ACP agent output.
+    /// Runs a turn against the user's own OpenAI-compatible endpoint. The
+    /// model gets real file tools over the workspace, so it behaves like the
+    /// ACP agents instead of a plain chat: it can read, search, and edit the
+    /// codebase, with every tool call shown in the timeline.
     fn run_api_turn(&mut self, text: String, cx: &mut Context<Self>) {
         let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let Some(root) = self.working_directory(cx) else {
+            self.push_system_message(
+                "Open a folder before using the Custom API agent so it has files to work on.",
+                cx,
+            );
             return;
         };
         let http = workspace.read(cx).app_state().client.http_client();
@@ -440,26 +456,79 @@ impl AgentPanel {
             );
             return;
         }
+        let host = ToolHost {
+            fs: self.fs.clone(),
+            root,
+            read_only: self.plan_mode,
+        };
         let label = self.active_label();
-        self.status = ConnectionState::Working { label: label.clone() };
+        self.status = ConnectionState::Working {
+            label: label.clone(),
+        };
         self.last_agent = Some(ActiveAgent::Api);
         self.api_cancel.store(false, Ordering::Relaxed);
         let cancel = self.api_cancel.clone();
+
+        let mut persisted = self.thread.export();
+        if let Some(PersistedItem {
+            kind: PersistedItemKind::User,
+            ..
+        }) = persisted.last()
+        {
+            persisted.pop();
+        }
+        let mut history: Vec<Value> = persisted
+            .into_iter()
+            .rev()
+            .take(MAX_HISTORY_ITEMS)
+            .filter_map(|item| match item.kind {
+                PersistedItemKind::User => Some(history_message("user", item.content)),
+                PersistedItemKind::Agent => Some(history_message("assistant", item.content)),
+                PersistedItemKind::Thought | PersistedItemKind::System => None,
+            })
+            .collect();
+        history.reverse();
+        history.push(history_message("user", text));
+
         self.turn_task = Some(cx.spawn(async move |this, cx| {
-            let messages = vec![("user".to_string(), text)];
-            let result = stream_chat(http, config, &messages, &cancel, |delta| {
+            let result = run_agent_turn(http, config, history, host, &cancel, |event| {
                 this.update(cx, |this, cx| {
-                    if let Some(index) = this.thread.stream_agent_message_chunk(delta.to_string()) {
-                        this.stream_markdown(Some(index), delta, cx);
+                    match event {
+                        TurnEvent::Text(delta) => {
+                            if let Some(index) =
+                                this.thread.stream_agent_message_chunk(delta.clone())
+                            {
+                                this.stream_markdown(Some(index), &delta, cx);
+                            }
+                        }
+                        TurnEvent::ToolCall(tool_call, phase) => {
+                            if phase == ToolCallPhase::Started
+                                && this.thread.tool_call_state(&tool_call.id).is_none()
+                            {
+                                this.thread.record_tool_call(tool_call.clone());
+                            } else {
+                                this.thread.update_tool_call(ToolCallUpdate {
+                                    id: tool_call.id.clone(),
+                                    title: None,
+                                    kind: None,
+                                    status: Some(tool_call.status.clone()),
+                                    content: Some(tool_call.content.clone()),
+                                    locations: Some(tool_call.locations.clone()),
+                                    raw_input: None,
+                                    raw_output: None,
+                                });
+                            }
+                        }
                     }
                     this.scroll_handle.scroll_to_bottom();
                     cx.notify();
                 })
                 .ok();
-            })
-            .await;
+            });
             this.update(cx, |this, cx| {
-                this.status = ConnectionState::Running { label: label.clone() };
+                this.status = ConnectionState::Running {
+                    label: label.clone(),
+                };
                 if let Err(error) = result {
                     this.push_system_message(format!("API request failed: {error:#}"), cx);
                 }
@@ -511,27 +580,30 @@ impl AgentPanel {
         cx.notify();
 
         match self.active_agent {
-            ActiveAgent::Builtin(profile) => {
-                match &self.status {
-                    ConnectionState::Running { .. } | ConnectionState::Working { .. } => {
-                        self.turn(vec![ContentBlock::text(wire)], cx);
-                    }
-                    ConnectionState::Starting { .. } => {
-                        self.pending_first_message = Some(wire);
-                    }
-                    ConnectionState::Idle | ConnectionState::Failed { .. } => {
-                        self.pending_first_message = Some(wire);
-                        self.start_agent(profile, cx);
-                    }
+            ActiveAgent::Builtin(profile) => match &self.status {
+                ConnectionState::Running { .. } | ConnectionState::Working { .. } => {
+                    self.turn(vec![ContentBlock::text(wire)], cx);
                 }
-            }
+                ConnectionState::Starting { .. } => {
+                    self.pending_first_message = Some(wire);
+                }
+                ConnectionState::Idle | ConnectionState::Failed { .. } => {
+                    self.pending_first_message = Some(wire);
+                    self.start_agent(profile, cx);
+                }
+            },
             ActiveAgent::Api => {
                 self.run_api_turn(wire, cx);
             }
         }
     }
 
-    fn toggle_plan_mode(&mut self, _: &TogglePlanMode, _window: &mut Window, cx: &mut Context<Self>) {
+    fn toggle_plan_mode(
+        &mut self,
+        _: &TogglePlanMode,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.plan_mode = !self.plan_mode;
         if !self.plan_mode {
             self.awaiting_approved_revision = false;
@@ -548,14 +620,16 @@ impl AgentPanel {
         if let Some(plan) = self.pending_plan.take() {
             self.plan_mode = false;
             self.awaiting_approved_revision = false;
-            let wire = format!("The user approved this plan. Execute it now, step by step:\n{plan}");
+            let wire =
+                format!("The user approved this plan. Execute it now, step by step:\n{plan}");
             self.submit_text("✓ Plan approved — executing.".into(), wire, cx);
         }
     }
 
     fn edit_plan(&mut self, cx: &mut Context<Self>) {
         if let Some(plan) = self.pending_plan.take() {
-            self.message_buffer.update(cx, |buffer, cx| buffer.set_text(plan, cx));
+            self.message_buffer
+                .update(cx, |buffer, cx| buffer.set_text(plan, cx));
             self.awaiting_approved_revision = true;
             self.pending_plan = None;
             cx.notify();
@@ -564,9 +638,10 @@ impl AgentPanel {
 
     fn reject_plan(&mut self, cx: &mut Context<Self>) {
         if self.pending_plan.take().is_some() {
-            let wire = "The user rejected the proposed plan. Ask clarifying questions or propose a \
+            let wire =
+                "The user rejected the proposed plan. Ask clarifying questions or propose a \
                         revised plan."
-                .to_string();
+                    .to_string();
             self.submit_text("✗ Plan rejected — asking for revision.".into(), wire, cx);
         }
     }
@@ -585,14 +660,17 @@ impl AgentPanel {
                 }
                 content.push_str(&entry.content);
             }
-        } else if let Some(fallback) = self.thread.timeline().iter().rev().find_map(|item| {
-            match item {
-                TimelineItem::AgentMessage { content } | TimelineItem::AgentThought { content } => {
-                    Some(content.clone())
-                }
-                _ => None,
-            }
-        }) {
+        } else if let Some(fallback) =
+            self.thread
+                .timeline()
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    TimelineItem::AgentMessage { content }
+                    | TimelineItem::AgentThought { content } => Some(content.clone()),
+                    _ => None,
+                })
+        {
             content = fallback;
         }
         if content.trim().is_empty() {
@@ -608,9 +686,12 @@ impl AgentPanel {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let Some(root) = workspace.read(cx).worktrees(cx).next().map(|worktree| {
-            worktree.read(cx).abs_path().to_path_buf()
-        }) else {
+        let Some(root) = workspace
+            .read(cx)
+            .worktrees(cx)
+            .next()
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+        else {
             return;
         };
         let fs = self.fs.clone();
@@ -653,8 +734,10 @@ impl AgentPanel {
         fallback_kind: &str,
         cx: &mut Context<Self>,
     ) {
-        let Some(PendingPermission { request_id, request }) =
-            self.thread.pending_permissions().last()
+        let Some(PendingPermission {
+            request_id,
+            request,
+        }) = self.thread.pending_permissions().last()
         else {
             return;
         };
@@ -699,7 +782,12 @@ impl AgentPanel {
         cx.notify();
     }
 
-    fn clear_conversation(&mut self, _: &ClearConversation, _: &mut Window, cx: &mut Context<Self>) {
+    fn clear_conversation(
+        &mut self,
+        _: &ClearConversation,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.teardown_agent(cx);
         self.thread = Thread::default();
         self.markdown_by_item.clear();
@@ -842,7 +930,8 @@ impl AgentPanel {
                 } else {
                     this.sessions.push(meta.clone());
                 }
-                this.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                this.sessions
+                    .sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 cx.notify();
             })
             .ok();
@@ -1082,17 +1171,13 @@ impl Render for AgentPanel {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll_handle)
-                    .child(
-                        v_flex()
-                            .px_2()
-                            .py_2()
-                            .gap_2()
-                            .children(if self.thread.timeline().is_empty() {
-                                vec![self.render_empty_state(cx)]
-                            } else {
-                                self.render_timeline(window, cx)
-                            }),
-                    ),
+                    .child(v_flex().px_2().py_2().gap_2().children(
+                        if self.thread.timeline().is_empty() {
+                            vec![self.render_empty_state(cx)]
+                        } else {
+                            self.render_timeline(window, cx)
+                        },
+                    )),
             )
             .child(self.render_permissions(cx))
             .child(self.render_plan_banner(cx))
@@ -1114,14 +1199,11 @@ impl AgentPanel {
         match &state {
             ConnectionState::Starting { label } => {
                 bar = bar.child(
-                    h_flex()
-                        .gap_1p5()
-                        .child(SpinnerLabel::new())
-                        .child(
-                            Label::new(format!("Starting {label}…"))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        ),
+                    h_flex().gap_1p5().child(SpinnerLabel::new()).child(
+                        Label::new(format!("Starting {label}…"))
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    ),
                 );
             }
             ConnectionState::Running { label } => {
@@ -1146,9 +1228,11 @@ impl AgentPanel {
                                     Button::new("agent-retry", "Retry")
                                         .label_size(LabelSize::Small)
                                         .color(Color::Accent)
-                                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                                            this.retry_last_agent(cx)
-                                        })),
+                                        .on_click(cx.listener(
+                                            |this, _: &gpui::ClickEvent, _, cx| {
+                                                this.retry_last_agent(cx)
+                                            },
+                                        )),
                                 )
                                 .child(
                                     Button::new("agent-switch", "Switch agent")
@@ -1186,11 +1270,11 @@ impl AgentPanel {
                 h_flex()
                     .gap_1p5()
                     .when(working, |this| this.child(SpinnerLabel::new()))
-                    .child(
-                        Label::new(label)
-                            .size(LabelSize::Small)
-                            .color(if working { Color::Accent } else { Color::Muted }),
-                    )
+                    .child(Label::new(label).size(LabelSize::Small).color(if working {
+                        Color::Accent
+                    } else {
+                        Color::Muted
+                    }))
                     .when_some(
                         self.thread.current_mode_id().map(SharedString::from),
                         |this, mode| {
@@ -1206,11 +1290,7 @@ impl AgentPanel {
             .into_any_element()
     }
 
-    fn render_timeline(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    fn render_timeline(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.thread
             .timeline()
             .iter()
@@ -1230,9 +1310,7 @@ impl AgentPanel {
                             _ => String::new(),
                         };
                         let style = match item {
-                            TimelineItem::AgentThought { .. } => {
-                                thought_markdown_style(window, cx)
-                            }
+                            TimelineItem::AgentThought { .. } => thought_markdown_style(window, cx),
                             _ => message_markdown_style(window, cx),
                         };
                         let message = div()
@@ -1356,11 +1434,9 @@ impl AgentPanel {
                 Color::Muted,
                 SharedString::from("pending"),
             ),
-            agent_acp::ToolCallStatus::InProgress => (
-                None,
-                Color::Accent,
-                SharedString::from("running"),
-            ),
+            agent_acp::ToolCallStatus::InProgress => {
+                (None, Color::Accent, SharedString::from("running"))
+            }
             agent_acp::ToolCallStatus::Completed => (
                 Some(IconName::Check),
                 Color::Success,
@@ -1377,21 +1453,17 @@ impl AgentPanel {
             .py_0p5()
             .gap_1p5()
             .overflow_hidden()
-            .children(icon.map(|icon| {
-                Icon::new(icon).size(IconSize::Small).color(status_color)
-            }))
-            .when(state.status == agent_acp::ToolCallStatus::InProgress, |this| {
-                this.child(SpinnerLabel::new())
-            })
+            .children(icon.map(|icon| Icon::new(icon).size(IconSize::Small).color(status_color)))
+            .when(
+                state.status == agent_acp::ToolCallStatus::InProgress,
+                |this| this.child(SpinnerLabel::new()),
+            )
             .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(
-                        Label::new(state.title.clone())
-                            .size(LabelSize::Small)
-                            .color(Color::Default),
-                    ),
+                div().flex_1().overflow_hidden().child(
+                    Label::new(state.title.clone())
+                        .size(LabelSize::Small)
+                        .color(Color::Default),
+                ),
             )
             .child(
                 Label::new(status_text)
@@ -1446,72 +1518,68 @@ impl AgentPanel {
             return v_flex();
         };
 
-        v_flex()
-            .flex_shrink_0()
-            .px_2()
-            .gap_1()
-            .child(
-                v_flex()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(colors.border)
-                    .bg(colors.surface_background)
-                    .px_2()
-                    .py_1p5()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Icon::new(IconName::ListTree)
-                                    .size(IconSize::Small)
-                                    .color(Color::Accent),
-                            )
-                            .child(
-                                Label::new("Plan ready — review before executing")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Default),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("agent-plan-body")
-                            .max_h_24()
-                            .overflow_y_scroll()
-                            .child(
-                                Label::new(plan.clone())
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(
-                                Button::new("plan-approve", "Approve")
-                                    .label_size(LabelSize::Small)
-                                    .color(Color::Accent)
-                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                                        this.approve_plan(cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("plan-edit", "Edit")
-                                    .label_size(LabelSize::Small)
-                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                                        this.edit_plan(cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("plan-reject", "Reject")
-                                    .label_size(LabelSize::Small)
-                                    .color(Color::Error)
-                                    .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
-                                        this.reject_plan(cx)
-                                    })),
-                            ),
-                    ),
-            )
+        v_flex().flex_shrink_0().px_2().gap_1().child(
+            v_flex()
+                .rounded_md()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.surface_background)
+                .px_2()
+                .py_1p5()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(IconName::ListTree)
+                                .size(IconSize::Small)
+                                .color(Color::Accent),
+                        )
+                        .child(
+                            Label::new("Plan ready — review before executing")
+                                .size(LabelSize::Small)
+                                .color(Color::Default),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("agent-plan-body")
+                        .max_h_24()
+                        .overflow_y_scroll()
+                        .child(
+                            Label::new(plan.clone())
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("plan-approve", "Approve")
+                                .label_size(LabelSize::Small)
+                                .color(Color::Accent)
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                    this.approve_plan(cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("plan-edit", "Edit")
+                                .label_size(LabelSize::Small)
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                    this.edit_plan(cx)
+                                })),
+                        )
+                        .child(
+                            Button::new("plan-reject", "Reject")
+                                .label_size(LabelSize::Small)
+                                .color(Color::Error)
+                                .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                    this.reject_plan(cx)
+                                })),
+                        ),
+                ),
+        )
     }
 
     fn render_permissions(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1554,15 +1622,17 @@ impl AgentPanel {
                             )
                             .label_size(LabelSize::Small)
                             .color(Color::Accent)
-                            .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
-                                this.answer_permission(
-                                    request_id.clone(),
-                                    PermissionOutcome::Selected {
-                                        option_id: option_id.clone(),
-                                    },
-                                    cx,
-                                )
-                            }))
+                            .on_click(cx.listener(
+                                move |this: &mut Self, _, _, cx| {
+                                    this.answer_permission(
+                                        request_id.clone(),
+                                        PermissionOutcome::Selected {
+                                            option_id: option_id.clone(),
+                                        },
+                                        cx,
+                                    )
+                                },
+                            ))
                         }),
                     ))
             }))
@@ -1755,14 +1825,11 @@ impl AgentPanel {
             .bg(colors.surface_background)
             .overflow_hidden()
             .child(
-                h_flex()
-                    .px_2()
-                    .py_1()
-                    .child(
-                        Label::new("Sessions")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
+                h_flex().px_2().py_1().child(
+                    Label::new("Sessions")
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
             )
             .children(if sessions.is_empty() {
                 vec![
@@ -1798,8 +1865,8 @@ impl AgentPanel {
         if config.base_url.is_empty() {
             return;
         }
-        let task = cx.spawn(async move |this, cx| {
-            match fetch_models(http, &config).await {
+        let task = cx.spawn(
+            async move |this, cx| match fetch_models(http, &config).await {
                 Ok(models) => {
                     this.update(cx, |this, cx| {
                         this.api_models = models;
@@ -1813,8 +1880,8 @@ impl AgentPanel {
                     })
                     .ok();
                 }
-            }
-        });
+            },
+        );
         self.model_selection_task = Some(task);
     }
 
@@ -1857,35 +1924,25 @@ impl AgentPanel {
                             .py_1()
                             .gap_1p5()
                             .hover(move |this| this.bg(hover_color))
-                            .on_click(cx.listener(
-                                move |this: &mut Self, _, _, cx| {
-                                    let setting = setting.clone();
-                                    update_settings_file(fs.clone(), cx, move |settings, _| {
-                                        settings.agent_panel.get_or_insert_default().model =
-                                            Some(setting);
-                                    });
-                                    this.show_model_selector = false;
-                                    cx.notify();
-                                },
-                            ))
+                            .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                                let setting = setting.clone();
+                                update_settings_file(fs.clone(), cx, move |settings, _| {
+                                    settings.agent_panel.get_or_insert_default().model =
+                                        Some(setting);
+                                });
+                                this.show_model_selector = false;
+                                cx.notify();
+                            }))
                             .child(
                                 Icon::new(IconName::Check)
                                     .size(IconSize::Small)
-                                    .color(if active {
-                                        Color::Accent
-                                    } else {
-                                        Color::Muted
-                                    }),
+                                    .color(if active { Color::Accent } else { Color::Muted }),
                             )
-                            .child(
-                                Label::new(label)
-                                    .size(LabelSize::Small)
-                                    .color(if active {
-                                        Color::Default
-                                    } else {
-                                        Color::Muted
-                                    }),
-                            )
+                            .child(Label::new(label).size(LabelSize::Small).color(if active {
+                                Color::Default
+                            } else {
+                                Color::Muted
+                            }))
                             .into_any_element()
                     })
                     .collect()

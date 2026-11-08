@@ -109,12 +109,14 @@ impl Thread {
                 PersistedItemKind::User => self.push_user_message(item.content),
                 PersistedItemKind::System => self.push_system_message(item.content),
                 PersistedItemKind::Agent => {
-                    self.items
-                        .push(TimelineItem::AgentMessage { content: item.content });
+                    self.items.push(TimelineItem::AgentMessage {
+                        content: item.content,
+                    });
                 }
                 PersistedItemKind::Thought => {
-                    self.items
-                        .push(TimelineItem::AgentThought { content: item.content });
+                    self.items.push(TimelineItem::AgentThought {
+                        content: item.content,
+                    });
                 }
             }
         }
@@ -266,9 +268,11 @@ impl Thread {
     /// The plan arrives as full snapshots; each snapshot replaces the previous
     /// one so the timeline holds a single live plan rather than a history.
     pub fn replace_plan(&mut self, entries: Vec<PlanEntry>) {
-        if let Some(index) = self.items.iter().rposition(|item| {
-            matches!(item, TimelineItem::Plan { .. })
-        }) {
+        if let Some(index) = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, TimelineItem::Plan { .. }))
+        {
             self.items[index] = TimelineItem::Plan { entries };
         } else {
             self.items.push(TimelineItem::Plan { entries });
@@ -307,18 +311,9 @@ mod tests {
     #[test]
     fn chunks_accumulate_into_one_message_per_role() {
         let mut thread = Thread::default();
-        assert_eq!(
-            thread.stream_agent_message_chunk("hel".into()),
-            Some(0)
-        );
-        assert_eq!(
-            thread.stream_agent_thought_chunk("thi".into()),
-            Some(1)
-        );
-        assert_eq!(
-            thread.stream_agent_message_chunk("lo".into()),
-            Some(2)
-        );
+        assert_eq!(thread.stream_agent_message_chunk("hel".into()), Some(0));
+        assert_eq!(thread.stream_agent_thought_chunk("thi".into()), Some(1));
+        assert_eq!(thread.stream_agent_message_chunk("lo".into()), Some(2));
         assert_eq!(
             thread.timeline(),
             &[
@@ -344,7 +339,9 @@ mod tests {
         assert_eq!(
             thread.timeline(),
             &[
-                TimelineItem::UserMessage { content: "hi".into() },
+                TimelineItem::UserMessage {
+                    content: "hi".into()
+                },
                 TimelineItem::AgentMessage {
                     content: "hey there".into()
                 },
@@ -368,8 +365,7 @@ mod tests {
             "kind": "read",
             "status": "in_progress",
         });
-        let tool_call: ToolCall =
-            serde_json::from_value(create_json).expect("parse tool call");
+        let tool_call: ToolCall = serde_json::from_value(create_json).expect("parse tool call");
         thread.record_tool_call(tool_call);
 
         let update_json = serde_json::json!({
