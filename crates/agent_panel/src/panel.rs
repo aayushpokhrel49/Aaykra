@@ -1821,7 +1821,7 @@ impl AgentPanel {
     fn render_model_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let hover_color = colors.element_hover;
-        let current = AgentPanelSettings::get_global(cx).model;
+        let current = AgentPanelSettings::get_global(cx).model.clone();
         let fs = self.fs.clone();
 
         v_flex()
@@ -1847,10 +1847,11 @@ impl AgentPanel {
                     .iter()
                     .map(|model| {
                         let active = *model == current;
-                        let model = model.clone();
+                        let label = model.clone();
+                        let setting = model.clone();
                         let fs = fs.clone();
                         h_flex()
-                            .id(format!("agent-model-{model}"))
+                            .id(format!("agent-model-{label}"))
                             .w_full()
                             .px_2()
                             .py_1()
@@ -1858,9 +1859,10 @@ impl AgentPanel {
                             .hover(move |this| this.bg(hover_color))
                             .on_click(cx.listener(
                                 move |this: &mut Self, _, _, cx| {
-                                    update_settings_file(fs, cx, move |settings, _| {
+                                    let setting = setting.clone();
+                                    update_settings_file(fs.clone(), cx, move |settings, _| {
                                         settings.agent_panel.get_or_insert_default().model =
-                                            Some(model.clone());
+                                            Some(setting);
                                     });
                                     this.show_model_selector = false;
                                     cx.notify();
@@ -1876,7 +1878,7 @@ impl AgentPanel {
                                     }),
                             )
                             .child(
-                                Label::new(model)
+                                Label::new(label)
                                     .size(LabelSize::Small)
                                     .color(if active {
                                         Color::Default
