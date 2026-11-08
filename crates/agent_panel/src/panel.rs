@@ -40,6 +40,33 @@ use crate::{
 
 const AGENT_PANEL_KEY: &str = "agent_panel";
 
+/// Builds a single-line editor used by the Custom API settings popover.
+fn api_field_editor(
+    placeholder: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<Editor> {
+    let buffer = cx.new(|cx| Buffer::local(String::new(), cx));
+    cx.new(move |cx| {
+        let multi_buffer = cx.new(|cx| MultiBuffer::singleton(buffer, cx));
+        let mut editor = Editor::new(
+            EditorMode::AutoHeight {
+                min_lines: 1,
+                max_lines: Some(1),
+            },
+            multi_buffer,
+            None,
+            window,
+            cx,
+        );
+        editor.set_show_gutter(false, cx);
+        editor.set_show_wrap_guides(false, cx);
+        editor.set_show_indent_guides(false, cx);
+        editor.set_placeholder_text(placeholder, window, cx);
+        editor
+    })
+}
+
 actions!(
     agent_panel,
     [
@@ -104,6 +131,10 @@ pub struct AgentPanel {
     show_sessions: bool,
     api_models: Vec<String>,
     show_model_selector: bool,
+    show_api_config: bool,
+    api_url_editor: Entity<Editor>,
+    api_key_editor: Entity<Editor>,
+    api_model_editor: Entity<Editor>,
     model_selection_task: Option<Task<()>>,
     plan_mode: bool,
     pending_plan: Option<String>,
@@ -140,6 +171,9 @@ impl AgentPanel {
                 editor
             })
         };
+        let api_url_editor = api_field_editor("https://api.inceptionlabs.ai/v1", window, cx);
+        let api_key_editor = api_field_editor("Your API key", window, cx);
+        let api_model_editor = api_field_editor("mercury-3", window, cx);
 
         let panel = cx.new(|cx| Self {
             workspace: workspace.weak_handle(),
@@ -167,6 +201,10 @@ impl AgentPanel {
             show_sessions: false,
             api_models: Vec::new(),
             show_model_selector: false,
+            show_api_config: false,
+            api_url_editor,
+            api_key_editor,
+            api_model_editor,
             model_selection_task: None,
             plan_mode: false,
             pending_plan: None,
@@ -711,6 +749,43 @@ impl AgentPanel {
             session.cancel();
         }
         self.api_cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// Opens or closes the Custom API settings popover, prefilling the fields
+    /// with the current settings so the user edits rather than types anew.
+    fn toggle_api_config(&mut self, show: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_api_config = show;
+        if show {
+            self.show_sessions = false;
+            self.show_agent_selector = false;
+            self.show_model_selector = false;
+            let settings = AgentPanelSettings::get_global(cx);
+            let api_url = settings.api_url.clone();
+            let api_key = settings.api_key.clone();
+            let model = settings.model.clone();
+            self.api_url_editor
+                .update(cx, |editor, cx| editor.set_text(api_url, window, cx));
+            self.api_key_editor
+                .update(cx, |editor, cx| editor.set_text(api_key, window, cx));
+            self.api_model_editor
+                .update(cx, |editor, cx| editor.set_text(model, window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Writes the popover fields into the user's settings.json.
+    fn save_api_config(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let api_url = self.api_url_editor.read(cx).text(cx).trim().to_string();
+        let api_key = self.api_key_editor.read(cx).text(cx).trim().to_string();
+        let model = self.api_model_editor.read(cx).text(cx).trim().to_string();
+        self.show_api_config = false;
+        update_settings_file(self.fs.clone(), cx, move |settings, _| {
+            let agent_panel = settings.agent_panel.get_or_insert_default();
+            agent_panel.api_url = Some(api_url);
+            agent_panel.api_key = Some(api_key);
+            agent_panel.model = Some(model);
+        });
+        cx.notify();
     }
 
     fn allow_once(&mut self, _: &AllowOnce, _: &mut Window, cx: &mut Context<Self>) {
@@ -1682,7 +1757,15 @@ impl AgentPanel {
                 this.show_sessions = !this.show_sessions;
                 this.show_agent_selector = false;
                 this.show_model_selector = false;
+                this.show_api_config = false;
                 cx.notify();
+            }));
+
+        let api_config_button = IconButton::new("agent-api-config", IconName::Settings)
+            .tooltip(Tooltip::text("Custom API settings"))
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                let show = !this.show_api_config;
+                this.toggle_api_config(show, window, cx);
             }));
 
         let is_api = matches!(self.active_agent, ActiveAgent::Api);
@@ -1704,6 +1787,7 @@ impl AgentPanel {
                     this.load_api_models(cx);
                 }
                 this.show_agent_selector = false;
+                this.show_api_config = false;
                 cx.notify();
             }))
         });
@@ -1714,6 +1798,7 @@ impl AgentPanel {
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                 this.show_agent_selector = !this.show_agent_selector;
                 this.show_sessions = false;
+                this.show_api_config = false;
                 cx.notify();
             }));
 
@@ -1730,6 +1815,9 @@ impl AgentPanel {
             })
             .when(self.show_model_selector, |this| {
                 this.child(self.render_model_selector(cx))
+            })
+            .when(self.show_api_config, |this| {
+                this.child(self.render_api_config(cx))
             })
             .child(
                 h_flex()
@@ -1755,6 +1843,7 @@ impl AgentPanel {
                     .child(clear_button)
                     .child(plan_mode_button)
                     .child(sessions_button)
+                    .child(api_config_button)
                     .when_some(model_button, |this, button| this.child(button))
                     .child(selector_trigger)
                     .child(action_button),
@@ -1947,6 +2036,68 @@ impl AgentPanel {
                     })
                     .collect()
             })
+    }
+
+    /// The Custom API settings popover: URL, key and model fields written to
+    /// settings.json on save.
+    fn render_api_config(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors().clone();
+        let field = |label: &'static str, id: &'static str, editor: &Entity<Editor>| {
+            v_flex()
+                .gap_0p5()
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .child(
+                    div()
+                        .id(id)
+                        .rounded_md()
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.editor_background)
+                        .px_1p5()
+                        .py_0p5()
+                        .child(editor.clone()),
+                )
+        };
+
+        v_flex()
+            .rounded_md()
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface_background)
+            .p_2()
+            .gap_1p5()
+            .child(
+                Label::new("Custom API")
+                    .size(LabelSize::Small)
+                    .color(Color::Default),
+            )
+            .child(field("API URL", "agent-api-url", &self.api_url_editor))
+            .child(field("API key", "agent-api-key", &self.api_key_editor))
+            .child(field("Model", "agent-api-model", &self.api_model_editor))
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap_1()
+                    .child(
+                        Button::new("agent-api-cancel", "Cancel")
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
+                                this.show_api_config = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("agent-api-save", "Save")
+                            .label_size(LabelSize::Small)
+                            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                                this.save_api_config(window, cx);
+                            })),
+                    ),
+            )
     }
 
     fn render_session_row(
