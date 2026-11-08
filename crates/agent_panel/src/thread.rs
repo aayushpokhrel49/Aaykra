@@ -7,9 +7,9 @@ use std::collections::HashMap;
 /// One rendered entry of the conversation timeline. Tool calls are referenced
 /// by id and resolved against the state map so a streaming update mutates the
 /// entry already shown instead of appending a new one.
-#[derive(Debug, Clone, PartialEq)]
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum TimelineItem {
     UserMessage { content: String },
     AgentMessage { content: String },

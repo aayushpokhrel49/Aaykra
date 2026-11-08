@@ -26,7 +26,6 @@ use workspace::{
 use crate::{
     agents::{ActiveAgent, AgentProfile, BUILTIN_PROFILES},
     api::{ApiConfig, fetch_models, stream_chat},
-    panel::AgentPanelStatusItem,
     session_store::{
         StoredSessionMeta, delete_session, load_body, load_index, new_session_id, now_unix_secs,
         save_session, sessions_dir,
@@ -966,14 +965,8 @@ impl Render for AgentPanelStatusItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         IconButton::new("agent-panel-status", IconName::Sparkle)
             .tooltip(Tooltip::text("Agent Panel (Ctrl+Shift+A)"))
-            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                if let Some(workspace) = this.workspace.upgrade() {
-                    workspace
-                        .update_in(window, cx, |workspace, window, cx| {
-                            workspace.toggle_panel_focus::<AgentPanel>(window, cx);
-                        })
-                        .ok();
-                }
+            .on_click(cx.listener(|_, _: &gpui::ClickEvent, window, cx| {
+                window.dispatch_action(Box::new(ToggleFocus), cx);
             }))
     }
 }
@@ -1351,7 +1344,7 @@ impl AgentPanel {
             .child(
                 Label::new("Ctrl+Shift+A toggles this panel")
                     .size(LabelSize::XSmall)
-                    .color(colors.text_muted),
+                    .color(Color::Custom(colors.text_muted)),
             )
             .into_any_element()
     }
@@ -1482,6 +1475,7 @@ impl AgentPanel {
                     )
                     .child(
                         div()
+                            .id("agent-plan-body")
                             .max_h_24()
                             .overflow_y_scroll()
                             .child(
@@ -1575,7 +1569,7 @@ impl AgentPanel {
     }
 
     fn render_input(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.theme().colors();
+        let colors = cx.theme().colors().clone();
         let working = matches!(self.status, ConnectionState::Working { .. });
         let action_button = if working {
             IconButton::new("agent-cancel-run", IconName::Stop)
@@ -1623,7 +1617,7 @@ impl AgentPanel {
 
         let is_api = matches!(self.active_agent, ActiveAgent::Api);
         let model_button = is_api.then(|| {
-            let current = AgentPanelSettings::get_global(cx).model;
+            let current = AgentPanelSettings::get_global(cx).model.clone();
             Button::new(
                 "agent-model-selector",
                 if current.is_empty() {
@@ -1761,19 +1755,25 @@ impl AgentPanel {
             .bg(colors.surface_background)
             .overflow_hidden()
             .child(
-                Label::new("Sessions")
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted)
+                h_flex()
                     .px_2()
-                    .py_1(),
+                    .py_1()
+                    .child(
+                        Label::new("Sessions")
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    ),
             )
             .children(if sessions.is_empty() {
                 vec![
-                    Label::new("No saved sessions yet.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
+                    h_flex()
                         .px_2()
                         .py_1()
+                        .child(
+                            Label::new("No saved sessions yet.")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
                         .into_any_element(),
                 ]
             } else {
@@ -1832,11 +1832,14 @@ impl AgentPanel {
             .overflow_hidden()
             .children(if self.api_models.is_empty() {
                 vec![
-                    Label::new("No models loaded. Check your API URL and key.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted)
+                    h_flex()
                         .px_2()
                         .py_1()
+                        .child(
+                            Label::new("No models loaded. Check your API URL and key.")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        )
                         .into_any_element(),
                 ]
             } else {
@@ -1887,11 +1890,17 @@ impl AgentPanel {
             })
     }
 
-    fn render_session_row(&mut self, meta: StoredSessionMeta, cx: &mut Context<Self>) -> AnyElement {        let colors = cx.theme().colors();
+    fn render_session_row(
+        &mut self,
+        meta: StoredSessionMeta,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let colors = cx.theme().colors();
         let hover_color = colors.element_hover;
         let id = meta.id.clone();
+        let open_id = id.clone();
         let open_row = h_flex()
-            .id(format!("agent-session-{id}"))
+            .id(format!("agent-session-{open_id}"))
             .flex_1()
             .min_w_0()
             .px_2()
@@ -1899,7 +1908,7 @@ impl AgentPanel {
             .gap_1p5()
             .hover(move |this| this.bg(hover_color))
             .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
-                this.restore_session(id.clone(), cx);
+                this.restore_session(open_id.clone(), cx);
             }))
             .child(
                 v_flex()
