@@ -181,7 +181,7 @@ pub async fn run_agent_turn(
                 ToolCall {
                     id: tool_call.id.clone(),
                     title: title.clone(),
-                    kind: Some(kind),
+                    kind: Some(kind.clone()),
                     status: ToolCallStatus::InProgress,
                     content: Vec::new(),
                     locations: vec![ToolCallLocation {
@@ -595,7 +595,7 @@ async fn ripgrep_search(
         .arg(path);
     let mut child = Child::spawn(command, Stdio::null(), Stdio::piped(), Stdio::null())?;
     let mut output = Vec::new();
-    if let Some(stdout) = child.stdout().take() {
+    if let Some(stdout) = child.stdout.take() {
         let mut stdout = stdout;
         stdout.read_to_end(&mut output).await?;
     }
@@ -632,7 +632,7 @@ async fn builtin_grep(
     let mut scanned = 0usize;
     let mut limit_hit = false;
 
-    while let Some(current) = pending.pop() {
+    'outer: while let Some(current) = pending.pop() {
         if matches.len() >= MAX_SCAN_RESULTS {
             break;
         }
@@ -669,7 +669,10 @@ async fn builtin_grep(
                 .flatten()
                 .map_or(false, |metadata| metadata.is_dir);
             if is_dir {
-                let name = entry.file_name().to_string_lossy().into_owned();
+                let name = entry
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 if SKIPPED_DIRECTORIES.contains(&name.as_str()) {
                     continue;
                 }
@@ -682,7 +685,7 @@ async fn builtin_grep(
             scanned += 1;
             if scanned > MAX_SCAN_FILES {
                 limit_hit = true;
-                break;
+                break 'outer;
             }
             let text = match host.fs.load(&entry).await {
                 Ok(text) => text,
@@ -778,7 +781,7 @@ async fn write_file_tool(host: &ToolHost, arguments: &Value) -> anyhow::Result<T
         change: Some(FileChange {
             path: display.clone(),
             old: old.as_deref().map(shorten_for_diff),
-            new: Some(shorten_for_diff(content)),
+            new: shorten_for_diff(content),
         }),
         locations: vec![ToolCallLocation {
             path: display,
@@ -861,7 +864,7 @@ async fn edit_file_tool(host: &ToolHost, arguments: &Value) -> anyhow::Result<To
         change: Some(FileChange {
             path: display.clone(),
             old: Some(shorten_for_diff(&existing)),
-            new: Some(shorten_for_diff(&replacement)),
+            new: shorten_for_diff(&replacement),
         }),
         locations: vec![ToolCallLocation {
             path: display,
@@ -1094,7 +1097,7 @@ fn relative_display(root: &Path, path: &Path) -> String {
     }
 }
 
-fn file_argument(arguments: &Value, name: &str) -> anyhow::Result<&str> {
+fn file_argument<'a>(arguments: &'a Value, name: &str) -> anyhow::Result<&'a str> {
     arguments[name]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("Missing required string argument \u{201c}{name}\u{201d}"))

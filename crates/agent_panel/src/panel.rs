@@ -150,6 +150,9 @@ impl AgentPanel {
     ) -> Entity<Self> {
         let fs = workspace.app_state().fs.clone();
         let message_buffer = cx.new(|cx| Buffer::local(String::new(), cx));
+        let api_url_editor = api_field_editor("https://api.inceptionlabs.ai/v1", window, cx);
+        let api_key_editor = api_field_editor("Your API key", window, cx);
+        let api_model_editor = api_field_editor("mercury-3", window, cx);
         let message_editor = {
             let message_buffer = message_buffer.clone();
             cx.new(move |cx| {
@@ -171,9 +174,6 @@ impl AgentPanel {
                 editor
             })
         };
-        let api_url_editor = api_field_editor("https://api.inceptionlabs.ai/v1", window, cx);
-        let api_key_editor = api_field_editor("Your API key", window, cx);
-        let api_model_editor = api_field_editor("mercury-3", window, cx);
 
         let panel = cx.new(|cx| Self {
             workspace: workspace.weak_handle(),
@@ -562,7 +562,8 @@ impl AgentPanel {
                     cx.notify();
                 })
                 .ok();
-            });
+            })
+            .await;
             this.update(cx, |this, cx| {
                 this.status = ConnectionState::Running {
                     label: label.clone(),
