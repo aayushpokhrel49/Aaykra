@@ -16,7 +16,7 @@ use fs::Fs;
 #[cfg(target_os = "windows")]
 mod wsl_picker;
 
-use remote::{RemoteConnectionOptions, same_remote_connection_identity};
+use remote::RemoteConnectionOptions;
 pub use remote_connection::{RemoteConnectionModal, connect, connect_with_modal};
 pub use remote_connections::{navigate_to_positions, open_remote_project};
 
@@ -244,7 +244,7 @@ fn get_open_folders(workspace: &Workspace, cx: &App) -> Vec<OpenFolderEntry> {
                 path,
                 branch,
                 is_active,
-                connection_options: connection_options.clone(),
+                connection_options: connection_options.cloned(),
             }
         })
         .collect();
@@ -500,6 +500,80 @@ pub fn init(cx: &mut App) {
     });
 
     cx.observe_new(DisconnectedOverlay::register).detach();
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
+=======
+
+    cx.on_action(|_: &OpenDevContainer, cx| {
+        with_active_or_new_workspace(cx, move |workspace, window, cx| {
+            if !workspace.project().read(cx).is_local() {
+                cx.spawn_in(window, async move |_, cx| {
+                    cx.prompt(
+                        gpui::PromptLevel::Critical,
+                        "Cannot open Dev Container from remote project",
+                        None,
+                        &["OK"],
+                    )
+                    .await
+                    .ok();
+                })
+                .detach();
+                return;
+            }
+
+            let fs = workspace.project().read(cx).fs().clone();
+            let configs = find_devcontainer_configs(workspace, cx);
+            let app_state = workspace.app_state().clone();
+            let dev_container_context = DevContainerContext::from_workspace(workspace, cx);
+            let handle = cx.entity().downgrade();
+            workspace.toggle_modal(window, cx, |window, cx| {
+                RemoteServerProjects::new_dev_container(
+                    fs,
+                    configs,
+                    app_state,
+                    dev_container_context,
+                    window,
+                    handle,
+                    cx,
+                )
+            });
+        });
+    });
+
+    // Subscribe to worktree additions to suggest opening the project in a dev container
+    cx.observe_new(
+        |workspace: &mut Workspace, window: Option<&mut Window>, cx: &mut Context<Workspace>| {
+            let Some(window) = window else {
+                return;
+            };
+            // A workspace opened with `--dev-container` has its worktrees scanning
+            // before this observer runs, so their update events can't be relied on
+            // to trigger the auto-open.
+            if workspace.open_in_dev_container() {
+                dev_container_suggest::open_dev_container_from_cli(workspace, window, cx);
+            }
+            cx.subscribe_in(
+                workspace.project(),
+                window,
+                move |workspace, project, event, window, cx| {
+                    if let project::Event::WorktreeUpdatedEntries(worktree_id, updated_entries) =
+                        event
+                    {
+                        dev_container_suggest::suggest_on_worktree_updated(
+                            workspace,
+                            *worktree_id,
+                            updated_entries,
+                            project,
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            )
+            .detach();
+        },
+    )
+    .detach();
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
 }
 
 #[cfg(target_os = "windows")]
@@ -1100,7 +1174,7 @@ impl PickerDelegate for RecentProjectsDelegate {
                                 .log_err();
                         } else {
                             let path_list = key.path_list().clone();
-                            let host = key.host();
+                            let host = key.host().cloned();
                             if let Some(task) = handle
                                 .update(cx, |multi_workspace, window, cx| {
                                     let modal_workspace = multi_workspace.workspace().clone();
@@ -1918,7 +1992,7 @@ impl PickerDelegate for RecentProjectsDelegate {
 
 fn icon_for_project_group(key: &ProjectGroupKey) -> IconName {
     let host = key.host();
-    icon_for_remote_connection(host.as_ref())
+    icon_for_remote_connection(host)
 }
 
 pub(crate) fn icon_for_remote_connection(options: Option<&RemoteConnectionOptions>) -> IconName {
@@ -2375,7 +2449,7 @@ impl RecentProjectsDelegate {
     fn is_in_current_window_groups(&self, workspace: &RecentWorkspace) -> bool {
         self.window_project_groups
             .iter()
-            .any(|key| key.matches(&workspace.project_group_key()))
+            .any(|key| key.matches_identity(&workspace.project_group_key()))
     }
 
     fn is_open_folder(&self, workspace: &RecentWorkspace) -> bool {
@@ -2391,10 +2465,11 @@ impl RecentProjectsDelegate {
         for workspace_path in workspace.paths.paths() {
             for open_folder in &self.open_folders {
                 if workspace_path == &open_folder.path
-                    && same_remote_connection_identity(
-                        workspace_host,
-                        open_folder.connection_options.as_ref(),
-                    )
+                    && workspace_host.map(|o| o.identity())
+                        == open_folder
+                            .connection_options
+                            .as_ref()
+                            .map(|o| o.identity())
                 {
                     return true;
                 }

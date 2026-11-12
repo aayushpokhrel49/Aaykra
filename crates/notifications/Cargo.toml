@@ -11,10 +11,14 @@ workspace = true
 [lib]
 path = "src/notifications.rs"
 doctest = false
+test = false
 
 [features]
 test-support = [
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
 
+=======
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
     "gpui/test-support",
     "rpc/test-support",
 ]
@@ -32,12 +36,6 @@ ui.workspace = true
 util.workspace = true
 workspace.workspace = true
 aaykra_actions.workspace = true
-
-[dev-dependencies]
-client = { workspace = true, features = ["test-support"] }
-gpui = { workspace = true, features = ["test-support"] }
-rpc = { workspace = true, features = ["test-support"] }
-util = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-shear]
 ignored = ["component"]

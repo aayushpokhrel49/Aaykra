@@ -10,9 +10,7 @@ workspace = true
 
 [lib]
 path = "src/inspector_ui.rs"
-
-[features]
-inspector = []
+doctest = false
 
 [dependencies]
 anyhow.workspace = true
@@ -27,6 +25,21 @@ serde_json_lenient.workspace = true
 theme_settings.workspace = true
 ui.workspace = true
 util.workspace = true
-util_macros.workspace = true
 workspace.workspace = true
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
 aaykra_actions.workspace = true
+=======
+zed_actions.workspace = true
+
+[dev-dependencies]
+fs = { workspace = true, features = ["test-support"] }
+futures.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+language = { workspace = true, features = ["test-support"] }
+paths.workspace = true
+project = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+snippet_provider.workspace = true
+theme.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f

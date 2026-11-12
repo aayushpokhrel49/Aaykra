@@ -89,12 +89,23 @@ function GenerateLicenses {
     . $PSScriptRoot/generate-licenses.ps1
 }
 
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
 function BuildAaykraAndItsFriends {
     Write-Output "Building Aaykra and its friends, for channel: $channel"
     cargo build --release --package aaykra --package cli --package auto_update_helper --target $target
     Copy-Item -Path ".\$CargoOutDir\aaykra.exe" -Destination "$innoDir\Aaykra.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+=======
+function BuildZedAndItsFriends {
+    Write-Output "Building Zed and its friends, for channel: $channel"
+    # Build zed.exe, cli.exe and auto-update-helper.exe
+    cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
+    Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
+    Copy-Item -Path ".\$CargoOutDir\auto-update-helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    # Build explorer_command_injector.dll
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
     switch ($channel) {
         "stable" {
             cargo build --release --features stable --no-default-features --package explorer_command_injector --target $target
@@ -110,9 +121,25 @@ function BuildRemoteServer {
     Write-Output "Building remote_server for $target"
     cargo build --release --package remote_server --target $target
 
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
     $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
     $remoteServerDst = "$workspace\target\aaykra-remote-server-windows-$Architecture.gz"
     Write-Output "Compressing remote_server to $remoteServerDst"
+=======
+    # SSH clients expect remote_server.exe inside the archive.
+    Copy-Item -Path ".\$CargoOutDir\remote-server.exe" -Destination "$innoDir\remote_server.exe" -Force
+    $remoteServerSrc = (Resolve-Path "$innoDir\remote_server.exe").Path
+
+    if ($canCodeSign) {
+        Write-Output "Code signing remote_server.exe"
+        & "$innoDir\sign.ps1" $remoteServerSrc
+    }
+
+    $remoteServerDst = "$env:ZED_WORKSPACE\target\zed-remote-server-windows-$Architecture.zip"
+    Write-Output "Compressing remote_server to $remoteServerDst"
+    Compress-Archive -Path $remoteServerSrc -DestinationPath $remoteServerDst -Force
+    Remove-Item -Path $remoteServerSrc -Force
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
 
     $input = [System.IO.File]::OpenRead($remoteServerSrc)
     $output = [System.IO.File]::Create($remoteServerDst)
@@ -145,8 +172,9 @@ function DownloadAMDGpuServices {
 }
 
 function DownloadConpty {
-    $url = "https://github.com/microsoft/terminal/releases/download/v1.23.13503.0/Microsoft.Windows.Console.ConPTY.1.23.251216003.nupkg"
-    $zipPath = ".\Microsoft.Windows.Console.ConPTY.1.23.251216003.nupkg"
+    # TODO: Switch back to the stable channel once Microsoft finally decides to publish v1.26
+    $url = "https://github.com/microsoft/terminal/releases/download/v1.25.1912.0/Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg"
+    $zipPath = ".\Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg"
     Invoke-WebRequest -Uri $url -OutFile $zipPath
     Expand-Archive -Path $zipPath -DestinationPath ".\conpty" -Force
 }

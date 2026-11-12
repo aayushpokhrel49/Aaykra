@@ -29,8 +29,13 @@ use project::{
 
 use language::{LanguageName, Toolchain, ToolchainScope};
 use remote::{
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
     RemoteConnectionIdentity, RemoteConnectionOptions, SshConnectionOptions, WslConnectionOptions,
     remote_connection_identity,
+=======
+    DockerConnectionOptions, RemoteConnectionIdentity, RemoteConnectionOptions,
+    SshConnectionOptions, WslConnectionOptions,
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
 };
 use serde::{Deserialize, Serialize};
 use sqlez::{
@@ -1062,6 +1067,9 @@ impl Domain for WorkspaceDb {
                 ON UPDATE CASCADE
             ) STRICT;
         ),
+        sql!(
+            ALTER TABLE workspaces ADD COLUMN native_window_state BLOB;
+        ),
     ];
 
     // Allow recovering from bad migration that was initially shipped to nightly
@@ -1497,7 +1505,7 @@ impl WorkspaceDb {
         log::debug!("Saving workspace at location: {:?}", workspace.location);
         self.write(move |conn| {
             conn.with_savepoint("update_worktrees", || {
-                let remote_connection_id = match workspace.location.clone() {
+                let remote_connection_id = match &workspace.location {
                     SerializedWorkspaceLocation::Local => None,
                     SerializedWorkspaceLocation::Remote(connection_options) => {
                         Some(Self::get_or_create_remote_connection_internal(
@@ -1690,58 +1698,85 @@ impl WorkspaceDb {
         &self,
         options: RemoteConnectionOptions,
     ) -> Result<RemoteConnectionId> {
-        self.write(move |conn| Self::get_or_create_remote_connection_internal(conn, options))
+        self.write(move |conn| Self::get_or_create_remote_connection_internal(conn, &options))
             .await
     }
 
     fn get_or_create_remote_connection_internal(
         this: &Connection,
-        options: RemoteConnectionOptions,
+        options: &RemoteConnectionOptions,
     ) -> Result<RemoteConnectionId> {
-        let identity = remote_connection_identity(&options);
         let kind;
-        let user: Option<String>;
+        let user: Option<Cow<'_, str>>;
         let mut host = None;
         let mut port = None;
         let mut distro = None;
 
-        match identity {
-            RemoteConnectionIdentity::Ssh {
-                host: identity_host,
-                username,
-                port: identity_port,
-            } => {
+        match options {
+            RemoteConnectionOptions::Ssh(options) => {
                 kind = RemoteConnectionKind::Ssh;
-                host = Some(identity_host);
-                port = identity_port;
-                user = username;
+                host = Some(options.host.to_cow());
+                port = options.port;
+                user = options.username.as_deref().map(Cow::Borrowed);
             }
-            RemoteConnectionIdentity::Wsl {
-                distro_name,
-                user: identity_user,
-            } => {
+            RemoteConnectionOptions::Wsl(options) => {
                 kind = RemoteConnectionKind::Wsl;
-                distro = Some(distro_name);
-                user = identity_user;
+                distro = Some(options.distro_name.as_str());
+                user = options.user.as_deref().map(Cow::Borrowed);
             }
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
+=======
+            RemoteConnectionOptions::Docker(options) => {
+                kind = RemoteConnectionKind::Docker;
+                container_id = Some(options.container_id.as_str());
+                user = Some(Cow::Borrowed(options.remote_user.as_str()));
+                name = Some(options.name.as_str());
+                use_podman = Some(options.use_podman);
+                remote_env = serde_json::to_string(&options.remote_env).ok();
+            }
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
             #[cfg(any(test, feature = "test-support"))]
-            RemoteConnectionIdentity::Mock { id } => {
+            RemoteConnectionOptions::Mock(options) => {
                 kind = RemoteConnectionKind::Ssh;
-                host = Some(format!("mock-{}", id));
-                user = Some(format!("mock-user-{}", id));
+                host = Some(format!("mock-{}", options.id).into());
+                user = Some(format!("mock-user-{}", options.id).into());
             }
         }
 
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
         Self::get_or_create_remote_connection_query(this, kind, host, port, user, distro)
+=======
+        Self::get_or_create_remote_connection_query(
+            this,
+            kind,
+            host.as_deref(),
+            port,
+            user.as_deref(),
+            distro,
+            name,
+            container_id,
+            use_podman,
+            remote_env.as_deref(),
+        )
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
     }
 
     fn get_or_create_remote_connection_query(
         this: &Connection,
         kind: RemoteConnectionKind,
-        host: Option<String>,
+        host: Option<&str>,
         port: Option<u16>,
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
         user: Option<String>,
         distro: Option<String>,
+=======
+        user: Option<&str>,
+        distro: Option<&str>,
+        name: Option<&str>,
+        container_id: Option<&str>,
+        use_podman: Option<bool>,
+        remote_env: Option<&str>,
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
     ) -> Result<RemoteConnectionId> {
         if let Some(id) = this.select_row_bound(sql!(
             SELECT id
@@ -1755,10 +1790,17 @@ impl WorkspaceDb {
             LIMIT 1
         ))?((
             kind.serialize(),
-            host.clone(),
+            host,
             port,
+<<<<<<< f50a707fcbfb535e683f575cebdb1580f8d6d233
             user.clone(),
             distro.clone(),
+=======
+            user,
+            distro,
+            name,
+            container_id,
+>>>>>>> c1c7e719cf8f6c805a800b7929218416c9e10f9f
         ))? {
             Ok(RemoteConnectionId(id))
         } else {
@@ -2026,7 +2068,7 @@ impl WorkspaceDb {
         let target_remote_connection = match &target.location {
             SerializedWorkspaceLocation::Local => None,
             SerializedWorkspaceLocation::Remote(connection) => {
-                Some(remote_connection_identity(connection))
+                Some(RemoteConnectionIdentity::from(connection))
             }
         };
 
@@ -2040,7 +2082,7 @@ impl WorkspaceDb {
                 let Some(connection_options) = remote_connections.get(&id) else {
                     continue;
                 };
-                Some(remote_connection_identity(connection_options))
+                Some(RemoteConnectionIdentity::from(connection_options))
             } else {
                 None
             };
@@ -2436,15 +2478,24 @@ impl WorkspaceDb {
     }
 
     query! {
-        pub(crate) async fn set_window_open_status(workspace_id: WorkspaceId, bounds: SerializedWindowBounds, display: Uuid) -> Result<()> {
+        pub(crate) async fn set_window_open_status(workspace_id: WorkspaceId, bounds: SerializedWindowBounds, display: Uuid, native_window_state: Option<Vec<u8>>) -> Result<()> {
             UPDATE workspaces
             SET window_state = ?2,
                 window_x = ?3,
                 window_y = ?4,
                 window_width = ?5,
                 window_height = ?6,
-                display = ?7
+                display = ?7,
+                native_window_state = ?8
             WHERE workspace_id = ?1
+        }
+    }
+
+    query! {
+        pub(crate) fn native_window_state(workspace_id: WorkspaceId) -> Result<Option<(Option<Uuid>, Option<Vec<u8>>)>> {
+            SELECT display, native_window_state
+            FROM workspaces
+            WHERE workspace_id = ?
         }
     }
 
@@ -2452,14 +2503,6 @@ impl WorkspaceDb {
         pub(crate) async fn set_centered_layout(workspace_id: WorkspaceId, centered_layout: bool) -> Result<()> {
             UPDATE workspaces
             SET centered_layout = ?2
-            WHERE workspace_id = ?1
-        }
-    }
-
-    query! {
-        pub(crate) async fn set_session_id(workspace_id: WorkspaceId, session_id: Option<String>) -> Result<()> {
-            UPDATE workspaces
-            SET session_id = ?2
             WHERE workspace_id = ?1
         }
     }
@@ -2710,14 +2753,16 @@ async fn resolve_local_workspace_identity(fs: &dyn Fs, paths: &PathList) -> Opti
 fn dedupe_recent_workspaces(
     workspaces: impl IntoIterator<Item = RecentWorkspace>,
 ) -> Vec<RecentWorkspace> {
-    let mut indices_by_key: HashMap<(Option<RemoteConnectionIdentity>, Vec<PathBuf>), usize> =
-        HashMap::default();
+    let mut indices_by_key: HashMap<
+        (Option<RemoteConnectionIdentity<'static>>, Vec<PathBuf>),
+        usize,
+    > = HashMap::default();
     let mut result: Vec<RecentWorkspace> = Vec::new();
     for workspace in workspaces {
         let location_identity = match &workspace.location {
             SerializedWorkspaceLocation::Local => None,
             SerializedWorkspaceLocation::Remote(connection) => {
-                Some(remote_connection_identity(connection))
+                Some(RemoteConnectionIdentity::from(connection).into_owned())
             }
         };
         let key = (location_identity, workspace.identity_paths.paths().to_vec());
@@ -3197,6 +3242,78 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(test_text_1, "test-text-1");
+    }
+
+    #[gpui::test]
+    async fn test_native_window_state_round_trip() {
+        zlog::init_test();
+
+        let db = WorkspaceDb::open_test_db("test_native_window_state_round_trip").await;
+        let id = db.next_id().await.unwrap();
+        let paths = &["/tmp/native-window-state"];
+        let display_uuid = Uuid::new_v4();
+        let window_bounds = SerializedWindowBounds(WindowBounds::Windowed(Bounds {
+            origin: point(px(100.0), px(200.0)),
+            size: size(px(800.0), px(600.0)),
+        }));
+
+        db.save_workspace(SerializedWorkspace {
+            id,
+            paths: PathList::new(paths),
+            identity_paths: None,
+            location: SerializedWorkspaceLocation::Local,
+            center_group: Default::default(),
+            window_bounds: None,
+            display: None,
+            docks: Default::default(),
+            bookmarks: Default::default(),
+            breakpoints: Default::default(),
+            centered_layout: false,
+            session_id: None,
+            window_id: None,
+            user_toolchains: Default::default(),
+            recent_navigation_history: Default::default(),
+        })
+        .await;
+        assert_eq!(db.native_window_state(id).unwrap(), Some((None, None)));
+        assert_eq!(
+            db.native_window_state(WorkspaceId::from_i64(i64::MAX))
+                .unwrap(),
+            None
+        );
+
+        let state = vec![0u8, 1, 2, 3, 250, 251, 252];
+        db.set_window_open_status(id, window_bounds, display_uuid, Some(state.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.native_window_state(id).unwrap(),
+            Some((Some(display_uuid), Some(state)))
+        );
+        let restored = db.workspace_for_roots(paths).unwrap();
+        assert_eq!(restored.window_bounds, Some(window_bounds));
+        assert_eq!(restored.display, Some(display_uuid));
+
+        let new_state = vec![9u8, 8, 7];
+        db.set_window_open_status(id, window_bounds, display_uuid, Some(new_state.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            db.native_window_state(id).unwrap(),
+            Some((Some(display_uuid), Some(new_state)))
+        );
+
+        db.set_window_open_status(id, window_bounds, display_uuid, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.native_window_state(id).unwrap(),
+            Some((Some(display_uuid), None))
+        );
+        assert_eq!(
+            db.workspace_for_roots(paths).unwrap().window_bounds,
+            Some(window_bounds)
+        );
     }
 
     #[gpui::test]
@@ -4471,7 +4588,7 @@ mod tests {
         db.save_workspace(workspace.clone()).await;
 
         // Save window bounds separately (as the actual code does via set_window_open_status)
-        db.set_window_open_status(id, window_bounds, display_uuid)
+        db.set_window_open_status(id, window_bounds, display_uuid, None)
             .await
             .unwrap();
 
@@ -5347,6 +5464,108 @@ mod tests {
             after.window_bounds.is_some(),
             "flush_serialization should ensure window bounds are persisted to the DB \
              before the process exits."
+        );
+    }
+
+    #[gpui::test]
+    async fn test_empty_window_without_items_stays_in_session(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = Project::test(fs.clone(), [], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+
+        let db = cx.update(|_, cx| WorkspaceDb::global(cx));
+        let workspace_id = db.next_id().await.unwrap();
+        let session_id = multi_workspace
+            .update_in(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, _| {
+                    workspace.set_database_id(workspace_id);
+                    workspace.session_id()
+                })
+            })
+            .unwrap();
+
+        multi_workspace
+            .update_in(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    workspace.flush_serialization(window, cx)
+                })
+            })
+            .await;
+
+        let restored = db
+            .last_session_workspace_locations(&session_id, None, fs.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(
+            restored
+                .iter()
+                .map(|workspace| workspace.workspace_id)
+                .collect::<Vec<_>>(),
+            vec![workspace_id]
+        );
+    }
+
+    #[gpui::test]
+    async fn test_window_with_last_folder_removed_reopens_empty(cx: &mut gpui::TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let fs = fs::FakeFs::new(cx.executor());
+        fs.insert_tree("/project", json!({ "main.rs": "" })).await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+
+        let db = cx.update(|_, cx| WorkspaceDb::global(cx));
+        let workspace_id = db.next_id().await.unwrap();
+        let session_id = multi_workspace
+            .update_in(cx, |multi_workspace, _, cx| {
+                multi_workspace.workspace().update(cx, |workspace, _| {
+                    workspace.set_database_id(workspace_id);
+                    workspace.session_id()
+                })
+            })
+            .unwrap();
+        multi_workspace
+            .update_in(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    workspace.flush_serialization(window, cx)
+                })
+            })
+            .await;
+        assert_eq!(
+            db.workspace_for_id(workspace_id).unwrap().paths,
+            PathList::new(&[Path::new("/project")])
+        );
+
+        let worktree_id = project.read_with(cx, |project, cx| {
+            project.worktrees(cx).next().unwrap().read(cx).id()
+        });
+        project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
+        multi_workspace
+            .update_in(cx, |multi_workspace, window, cx| {
+                multi_workspace.workspace().update(cx, |workspace, cx| {
+                    workspace.flush_serialization(window, cx)
+                })
+            })
+            .await;
+
+        assert_eq!(
+            db.workspace_for_id(workspace_id).unwrap().paths,
+            PathList::default()
+        );
+        let restored = db
+            .last_session_workspace_locations(&session_id, None, fs.as_ref())
+            .await
+            .unwrap();
+        assert_eq!(
+            restored
+                .iter()
+                .map(|workspace| (workspace.workspace_id, workspace.paths.clone()))
+                .collect::<Vec<_>>(),
+            vec![(workspace_id, PathList::default())]
         );
     }
 
