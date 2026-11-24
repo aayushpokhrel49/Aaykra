@@ -5,7 +5,7 @@ on:
       ref:
         description: Commit, tag or branch to build
         required: true
-        default: v1.2.1
+        default: v1.5.0
       clang:
         description: Clang and LLD version
         type: choice

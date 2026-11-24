@@ -2,18 +2,22 @@
 
 set -e
 
-if [[ -x cargo-depgraph ]]; then
+if ! command -v cargo-depgraph >/dev/null 2>&1; then
     cargo install cargo-depgraph
 fi
 
-graph_file=target/crate-graph.html
+graph_file=target/crate-graph.svg
 
 cargo depgraph \
     --workspace-only \
     --offline \
-    --root=zed,cli,collab \
+    --root=aaykra,cli \
     --dedup-transitive-deps \
-    | dot -Tsvg > $graph_file
+    | dot -Tsvg > "$graph_file"
 
 echo "open $graph_file"
-open $graph_file
+if command -v open >/dev/null 2>&1; then
+    open "$graph_file"
+elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$graph_file"
+fi

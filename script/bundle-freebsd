@@ -28,7 +28,7 @@ export ZED_BUNDLE=true
 channel=$(<crates/aaykra/RELEASE_CHANNEL)
 target_dir="${CARGO_TARGET_DIR:-target}"
 
-version="$(script/get-crate-version zed)"
+version="$(script/get-crate-version aaykra)"
 # Set RELEASE_VERSION so it's compiled into GPUI and it knows about the version.
 export RELEASE_VERSION="${version}"
 
