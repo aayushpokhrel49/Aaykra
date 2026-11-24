@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+target_dir="${CARGO_TARGET_DIR:-target}"
+version="$(script/get-crate-version aaykra)"
+commit="$(git rev-parse --short HEAD)"
+deb_version="${version}~nightly.$(date -u +%Y%m%d).${commit}"
+
+script/bundle-linux
+
+arch="$(uname -m)"
+case "$arch" in
+    x86_64) deb_arch=amd64 ;;
+    aarch64) deb_arch=arm64 ;;
+    *)
+        echo "Unsupported architecture: $arch" >&2
+        exit 1
+        ;;
+esac
+
+archive="${target_dir}/release/aaykra-linux-${arch}.tar.gz"
+if [[ ! -f "$archive" ]]; then
+    echo "Expected bundle archive at $archive" >&2
+    exit 1
+fi
+
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+
+tar -xzf "$archive" -C "$work_dir"
+
+app_dir="$(find "$work_dir" -maxdepth 1 -mindepth 1 -type d -name 'aaykra*.app' -print -quit)"
+if [[ -z "$app_dir" ]]; then
+    echo "Could not find the Aaykra app bundle in $archive" >&2
+    exit 1
+fi
+
+package_dir="${work_dir}/package"
+install -d \
+    "${package_dir}/DEBIAN" \
+    "${package_dir}/opt/aaykra" \
+    "${package_dir}/usr/bin" \
+    "${package_dir}/usr/share/applications" \
+    "${package_dir}/usr/share/doc/aaykra" \
+    "${package_dir}/usr/share/icons/hicolor/512x512/apps" \
+    "${package_dir}/usr/share/icons/hicolor/1024x1024/apps"
+
+cp -a "${app_dir}/." "${package_dir}/opt/aaykra/"
+ln -s /opt/aaykra/bin/aaykra "${package_dir}/usr/bin/aaykra"
+
+for size in 512 1024; do
+    icon="${package_dir}/opt/aaykra/share/icons/hicolor/${size}x${size}/apps/aaykra.png"
+    if [[ -f "$icon" ]]; then
+        cp "$icon" "${package_dir}/usr/share/icons/hicolor/${size}x${size}/apps/aaykra.png"
+    fi
+done
+
+desktop_file="$(find "${package_dir}/opt/aaykra/share/applications" -maxdepth 1 -name '*.desktop' -print -quit)"
+if [[ -n "$desktop_file" ]]; then
+    cp "$desktop_file" "${package_dir}/usr/share/applications/"
+fi
+
+if [[ -f "${package_dir}/opt/aaykra/licenses.md" ]]; then
+    cp "${package_dir}/opt/aaykra/licenses.md" "${package_dir}/usr/share/doc/aaykra/licenses.md"
+fi
+
+cat > "${package_dir}/DEBIAN/control" <<EOF
+Package: aaykra
+Version: ${deb_version}
+Section: editors
+Priority: optional
+Architecture: ${deb_arch}
+Maintainer: Aayush Pokhrel <aayushpokhrel499@gmail.com>
+Homepage: https://code.aayushpokhrel.com.np
+Depends: libasound2, libc6, libgcc-s1, libglib2.0-0
+Description: Aaykra code editor nightly build
+ A fast, native code editor.
+EOF
+
+deb_file="${target_dir}/aaykra_${deb_version}_${deb_arch}.deb"
+dpkg-deb --build --root-owner-group "$package_dir" "$deb_file"
+echo "Created $deb_file"
