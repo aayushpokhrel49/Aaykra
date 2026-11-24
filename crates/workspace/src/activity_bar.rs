@@ -1,0 +1,654 @@
+use crate::dock::{Dock, PanelHandle, activate_panel_button, panel_button_context_menu};
+use crate::{ActivityBarSettings, Workspace};
+use gpui::{
+    Action, Anchor, App, Context, Entity, FocusHandle, Focusable as _, IntoElement, ParentElement,
+    Pixels, Render, SharedString, Styled, Subscription, Task, WeakEntity, Window, px,
+};
+use i18n::t;
+use settings::{ActivityBarPosition, Settings as _, SettingsStore};
+use std::sync::Arc;
+use ui::{
+    ButtonSize, ContextMenu, CountBadge, Icon, IconButton, IconName, IconSize, PopoverMenu,
+    Tooltip, prelude::*, right_click_menu,
+};
+use util::ResultExt as _;
+
+const DEFAULT_ICON_SIZE: Rems = rems(1.25);
+
+fn on_right(cx: &App) -> bool {
+    ActivityBarSettings::get_global(cx).position == ActivityBarPosition::Right
+}
+
+fn menu_anchors(top: bool, cx: &App) -> (Anchor, Anchor) {
+    match (top, on_right(cx)) {
+        (true, false) => (Anchor::TopLeft, Anchor::TopRight),
+        (true, true) => (Anchor::TopRight, Anchor::TopLeft),
+        (false, false) => (Anchor::BottomLeft, Anchor::BottomRight),
+        (false, true) => (Anchor::BottomRight, Anchor::BottomLeft),
+    }
+}
+
+fn icon_size(window: &Window, cx: &App) -> Pixels {
+    ActivityBarSettings::get_global(cx)
+        .icon_size
+        .map(px)
+        .unwrap_or_else(|| DEFAULT_ICON_SIZE.to_pixels(window.rem_size()))
+}
+
+fn icon_rems(window: &Window, cx: &App) -> Rems {
+    rems(f32::from(icon_size(window, cx)) / f32::from(window.rem_size()))
+}
+
+fn button_height(window: &Window, cx: &App) -> Pixels {
+    icon_size(window, cx) + px(16.)
+}
+
+pub(crate) fn bar_width(window: &Window, cx: &App) -> Pixels {
+    icon_size(window, cx) + px(24.)
+}
+
+/// Entries are shown in this order by `Panel::panel_key()` until the user drags
+/// them around. Panels not listed come after, in dock order (left dock first).
+const DEFAULT_ORDER: [&str; 6] = [
+    "ProjectPanel",
+    "SearchPanel",
+    "GitPanel",
+    "OutlinePanel",
+    "DebugPanel",
+    "AgentPanel",
+];
+
+const ORDER_KEY: &str = "activity_bar_order";
+
+/// A vertical bar on the left edge of the window with one button per left or right
+/// dock panel, like the activity bar in VS Code.
+pub struct ActivityBar {
+    workspace: WeakEntity<Workspace>,
+    left_dock: Entity<Dock>,
+    right_dock: Entity<Dock>,
+    order: Vec<String>,
+    _serialization: Task<()>,
+    _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone)]
+pub struct DraggedActivityBarEntry {
+    key: &'static str,
+    icon: IconName,
+}
+
+impl Render for DraggedActivityBarEntry {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .p_1()
+            .rounded_md()
+            .bg(cx.theme().colors().elevated_surface_background)
+            .child(Icon::new(self.icon).size(IconSize::Custom(icon_rems(window, cx))))
+    }
+}
+
+pub enum ActivityBarEntry {
+    Panel {
+        dock: Entity<Dock>,
+        panel_index: usize,
+        panel: Arc<dyn PanelHandle>,
+        icon: IconName,
+        icon_tooltip: &'static str,
+    },
+}
+
+impl ActivityBarEntry {
+    pub fn key(&self) -> &'static str {
+        match self {
+            ActivityBarEntry::Panel { panel, .. } => panel.panel_key(),
+        }
+    }
+
+    /// The action the entry's button dispatches, its tooltip, whether the button is
+    /// shown as active, and the focus handle to focus before dispatching.
+    fn button_state(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> (Box<dyn Action>, SharedString, bool, FocusHandle) {
+        match self {
+            ActivityBarEntry::Panel {
+                dock,
+                panel_index,
+                icon_tooltip,
+                ..
+            } => {
+                let dock = dock.read(cx);
+                let (action, tooltip, is_active) =
+                    dock.panel_button_action(*panel_index, icon_tooltip, window, cx);
+                (action, tooltip, is_active, dock.focus_handle(cx))
+            }
+        }
+    }
+}
+
+impl ActivityBar {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        left_dock: Entity<Dock>,
+        right_dock: Entity<Dock>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![
+            cx.observe(&left_dock, |_, _, cx| cx.notify()),
+            cx.observe(&right_dock, |_, _, cx| cx.notify()),
+            cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
+        ];
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        cx.spawn(async move |this, cx| {
+            let stored_order = cx
+                .background_spawn(async move { kvp.read_kvp(ORDER_KEY) })
+                .await
+                .log_err()
+                .flatten()
+                .and_then(|json| serde_json::from_str::<Vec<String>>(&json).log_err());
+            if let Some(order) = stored_order {
+                this.update(cx, |this, cx| {
+                    this.order = order;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+        Self {
+            workspace,
+            left_dock,
+            right_dock,
+            order: DEFAULT_ORDER.iter().map(|key| key.to_string()).collect(),
+            _serialization: Task::ready(()),
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// Moves the dragged entry to the slot of the entry it was dropped on and
+    /// remembers the resulting order across restarts.
+    pub fn move_entry(
+        &mut self,
+        dragged_key: &str,
+        target_key: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if dragged_key == target_key {
+            return;
+        }
+        let mut keys: Vec<String> = self
+            .entry_keys(window, cx)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let (Some(from), Some(to)) = (
+            keys.iter().position(|key| key == dragged_key),
+            keys.iter().position(|key| key == target_key),
+        ) else {
+            return;
+        };
+        let dragged = keys.remove(from);
+        keys.insert(to, dragged);
+        self.order = keys;
+        let json = serde_json::to_string(&self.order).log_err();
+        let kvp = db::kvp::KeyValueStore::global(cx);
+        self._serialization = cx.background_spawn(async move {
+            if let Some(json) = json {
+                kvp.write_kvp(ORDER_KEY.to_string(), json).await.log_err();
+            }
+        });
+        cx.notify();
+    }
+
+    pub fn entries(&self, window: &Window, cx: &App) -> Vec<ActivityBarEntry> {
+        let mut entries = Vec::new();
+        for dock in [&self.left_dock, &self.right_dock] {
+            for (panel_index, panel) in dock.read(cx).panels().enumerate() {
+                let Some(icon) = panel.icon(window, cx) else {
+                    continue;
+                };
+                let Some(icon_tooltip) = panel
+                    .icon_tooltip(window, cx)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("can't render an activity bar button without a tooltip")
+                    })
+                    .log_err()
+                else {
+                    continue;
+                };
+                entries.push(ActivityBarEntry::Panel {
+                    dock: dock.clone(),
+                    panel_index,
+                    panel: panel.clone(),
+                    icon,
+                    icon_tooltip,
+                });
+            }
+        }
+        entries.sort_by_key(|entry| {
+            self.order
+                .iter()
+                .position(|key| key == entry.key())
+                .unwrap_or(self.order.len())
+        });
+        entries
+    }
+
+    pub fn entry_keys(&self, window: &Window, cx: &App) -> Vec<&'static str> {
+        self.entries(window, cx)
+            .iter()
+            .map(ActivityBarEntry::key)
+            .collect()
+    }
+
+    /// Does what clicking the entry's button does. Returns false when there is no
+    /// entry with the given key.
+    pub fn activate_entry(&self, key: &str, window: &mut Window, cx: &mut App) -> bool {
+        let entries = self.entries(window, cx);
+        let Some(entry) = entries.iter().find(|entry| entry.key() == key) else {
+            return false;
+        };
+        let (action, _, _, focus_handle) = entry.button_state(window, cx);
+        activate_panel_button(&focus_handle, &*action, window, cx);
+        true
+    }
+
+    fn render_entry(
+        &self,
+        entry: ActivityBarEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let key = entry.key();
+        let (action, tooltip, is_active, focus_handle) = entry.button_state(window, cx);
+        let (icon, icon_tooltip) = match &entry {
+            ActivityBarEntry::Panel {
+                icon, icon_tooltip, ..
+            } => (*icon, *icon_tooltip),
+        };
+        let badge_count = match &entry {
+            ActivityBarEntry::Panel { panel, .. } => panel
+                .icon_label(window, cx)
+                .and_then(|label| label.parse::<usize>().ok()),
+        };
+
+        let icon_rems = icon_rems(window, cx);
+        let button_height = button_height(window, cx);
+        let button = move |is_menu_open: bool| {
+            let action = action.boxed_clone();
+            let focus_handle = focus_handle.clone();
+            let tooltip = tooltip.clone();
+            // Include active state in element ID to invalidate the cached
+            // tooltip when panel state changes (e.g., via keyboard shortcut)
+            IconButton::new((key, is_active as u64), icon)
+                .size(ButtonSize::Large)
+                .height(button_height.into())
+                .icon_size(IconSize::Custom(icon_rems))
+                .toggle_state(is_active)
+                .tab_index(0isize)
+                .aria_label(i18n::translate(icon_tooltip))
+                .on_click({
+                    let action = action.boxed_clone();
+                    move |_, window, cx| activate_panel_button(&focus_handle, &*action, window, cx)
+                })
+                .when(!is_menu_open, |this| {
+                    this.tooltip(move |_window, cx| {
+                        Tooltip::for_action(tooltip.clone(), &*action, cx)
+                    })
+                })
+        };
+
+        match entry {
+            ActivityBarEntry::Panel { dock, panel, .. } => {
+                let workspace = self.workspace.clone();
+                let position = self
+                    .order
+                    .iter()
+                    .position(|ordered| ordered == key)
+                    .unwrap_or(self.order.len());
+                let drop_indicator_above =
+                    move |dragged: &DraggedActivityBarEntry, order: &[String]| {
+                        order
+                            .iter()
+                            .position(|ordered| ordered == dragged.key)
+                            .is_none_or(|dragged_position| position < dragged_position)
+                    };
+                let order = self.order.clone();
+                let (menu_anchor, menu_attach) = menu_anchors(true, cx);
+                let on_drop =
+                    cx.listener(move |this, dragged: &DraggedActivityBarEntry, window, cx| {
+                        this.move_entry(dragged.key, key, window, cx);
+                    });
+                right_click_menu(format!("activity-bar-{key}"))
+                    .menu(move |window, cx| {
+                        panel_button_context_menu(&panel, &dock, &workspace, window, cx)
+                    })
+                    .anchor(menu_anchor)
+                    .attach(menu_attach)
+                    .trigger(move |is_menu_open, _window, _cx| {
+                        div()
+                            .id(SharedString::from(format!("activity-bar-entry-{key}")))
+                            .relative()
+                            .rounded_md()
+                            .on_drag(DraggedActivityBarEntry { key, icon }, |entry, _, _, cx| {
+                                cx.new(|_| entry.clone())
+                            })
+                            .drag_over::<DraggedActivityBarEntry>(move |style, dragged, _, cx| {
+                                let colors = cx.theme().colors();
+                                let style = style
+                                    .bg(colors.drop_target_background)
+                                    .border_color(colors.drop_target_border);
+                                if drop_indicator_above(dragged, &order) {
+                                    style.border_t_2()
+                                } else {
+                                    style.border_b_2()
+                                }
+                            })
+                            .on_drop(on_drop)
+                            .child(button(is_menu_open))
+                            .when_some(badge_count, |this, count| {
+                                this.child(CountBadge::new(count))
+                            })
+                    })
+                    .into_any_element()
+            }
+        }
+    }
+}
+
+impl Render for ActivityBar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let bar = v_flex()
+            .id("activity-bar")
+            .flex_none()
+            .w(bar_width(window, cx))
+            .h_full()
+            .items_center()
+            .gap_2()
+            .py_1()
+            .bg(colors.status_bar_background)
+            .map(|bar| {
+                if on_right(cx) {
+                    bar.border_l_1()
+                } else {
+                    bar.border_r_1()
+                }
+            })
+            .border_color(colors.border);
+        let mut buttons = Vec::new();
+        for entry in self.entries(window, cx) {
+            buttons.push(self.render_entry(entry, window, cx));
+        }
+        bar.children(buttons)
+            .child(div().flex_1())
+            .child(self.render_settings_menu(window, cx))
+    }
+}
+
+impl ActivityBar {
+    fn render_settings_menu(&self, window: &Window, cx: &App) -> impl IntoElement {
+        PopoverMenu::new("activity-bar-settings-menu")
+            .trigger_with_tooltip(
+                IconButton::new("activity-bar-settings", IconName::ActivitySettings)
+                    .size(ButtonSize::Large)
+                    .height(button_height(window, cx).into())
+                    .icon_size(IconSize::Custom(icon_rems(window, cx)))
+                    .tab_index(0isize)
+                    .aria_label(t!("Manage")),
+                Tooltip::text(t!("Manage")),
+            )
+            .menu(|window, cx| {
+                ContextMenu::build(window, cx, |menu, _, _| {
+                    menu.action(t!("Settings"), aaykra_actions::OpenSettings.boxed_clone())
+                        .action(t!("Keymap"), Box::new(aaykra_actions::OpenKeymap))
+                        .action(
+                            t!("Themes…"),
+                            aaykra_actions::theme_selector::Toggle::default().boxed_clone(),
+                        )
+                        .action(
+                            t!("Icon Themes…"),
+                            aaykra_actions::icon_theme_selector::Toggle::default().boxed_clone(),
+                        )
+                        .action(
+                            t!("Extensions"),
+                            aaykra_actions::Extensions::default().boxed_clone(),
+                        )
+                })
+                .into()
+            })
+            .anchor(menu_anchors(false, cx).0)
+            .attach(menu_anchors(false, cx).1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dock::{DockPosition, Panel, PanelEvent, PanelSizeState};
+    use crate::tests::init_test;
+    use gpui::{EventEmitter, Focusable, TestAppContext, actions, div};
+    use project::{FakeFs, Project};
+
+    actions!(activity_bar_test, [ToggleFirstPanel, ToggleSecondPanel]);
+
+    const KEYS: [&str; 2] = ["OutlinePanel", "ProjectPanel"];
+
+    struct IconPanel<const INDEX: usize> {
+        focus_handle: FocusHandle,
+    }
+
+    impl<const INDEX: usize> EventEmitter<PanelEvent> for IconPanel<INDEX> {}
+
+    impl<const INDEX: usize> Focusable for IconPanel<INDEX> {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl<const INDEX: usize> Render for IconPanel<INDEX> {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().track_focus(&self.focus_handle(cx))
+        }
+    }
+
+    impl<const INDEX: usize> Panel for IconPanel<INDEX> {
+        fn persistent_name() -> &'static str {
+            KEYS[INDEX]
+        }
+
+        fn panel_key() -> &'static str {
+            KEYS[INDEX]
+        }
+
+        fn position(&self, _window: &Window, _cx: &App) -> DockPosition {
+            DockPosition::Left
+        }
+
+        fn position_is_valid(&self, position: DockPosition) -> bool {
+            position == DockPosition::Left
+        }
+
+        fn set_position(&mut self, _: DockPosition, _: &mut Window, _: &mut Context<Self>) {}
+
+        fn default_size(&self, _window: &Window, _cx: &App) -> Pixels {
+            px(300.)
+        }
+
+        fn initial_size_state(&self, _window: &Window, _cx: &App) -> PanelSizeState {
+            PanelSizeState {
+                size: None,
+                flex: None,
+            }
+        }
+
+        fn icon(&self, _window: &Window, _cx: &App) -> Option<IconName> {
+            Some(IconName::FileTree)
+        }
+
+        fn icon_tooltip(&self, _window: &Window, _cx: &App) -> Option<&'static str> {
+            Some(KEYS[INDEX])
+        }
+
+        fn toggle_action(&self) -> Box<dyn Action> {
+            if INDEX == 0 {
+                ToggleFirstPanel.boxed_clone()
+            } else {
+                ToggleSecondPanel.boxed_clone()
+            }
+        }
+
+        fn activation_priority(&self) -> u32 {
+            INDEX as u32
+        }
+    }
+
+    #[gpui::test]
+    async fn test_activity_bar_entries_and_toggle(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            crate::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            let outline_panel = cx.new(|cx| IconPanel::<0> {
+                focus_handle: cx.focus_handle(),
+            });
+            let project_panel = cx.new(|cx| IconPanel::<1> {
+                focus_handle: cx.focus_handle(),
+            });
+            workspace.add_panel(outline_panel, window, cx);
+            workspace.add_panel(project_panel, window, cx);
+        });
+        // Real panels register their toggle actions on the workspace during
+        // app init; global handlers stand in for that here.
+        let window_handle = cx.update(|window, _| window.window_handle());
+        cx.update(|_, cx| {
+            let first_workspace = workspace.clone();
+            cx.on_action(move |_: &ToggleFirstPanel, cx| {
+                let workspace = first_workspace.clone();
+                // The action is dispatched inside a window update, so the
+                // toggle has to wait until that update finishes.
+                cx.defer(move |cx| {
+                    window_handle
+                        .update(cx, |_, window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_panel_focus::<IconPanel<0>>(window, cx);
+                            })
+                        })
+                        .ok();
+                });
+            });
+            let second_workspace = workspace.clone();
+            cx.on_action(move |_: &ToggleSecondPanel, cx| {
+                let workspace = second_workspace.clone();
+                // The action is dispatched inside a window update, so the
+                // toggle has to wait until that update finishes.
+                cx.defer(move |cx| {
+                    window_handle
+                        .update(cx, |_, window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.toggle_panel_focus::<IconPanel<1>>(window, cx);
+                            })
+                        })
+                        .ok();
+                });
+            });
+        });
+        cx.run_until_parked();
+
+        let keys = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activity_bar().read(cx).entry_keys(window, cx)
+        });
+        assert_eq!(keys, vec!["ProjectPanel", "OutlinePanel"]);
+
+        let is_open =
+            workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
+        assert!(!is_open);
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .clone()
+                .update(cx, |activity_bar, cx| {
+                    assert!(activity_bar.activate_entry("OutlinePanel", window, cx));
+                });
+        });
+        cx.run_until_parked();
+
+        let (is_open, active_index) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            (dock.is_open(), dock.active_panel_index())
+        });
+        assert!(is_open, "activating an inactive entry opens its dock");
+        assert_eq!(active_index, Some(0));
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .clone()
+                .update(cx, |activity_bar, cx| {
+                    assert!(activity_bar.activate_entry("ProjectPanel", window, cx));
+                });
+        });
+        cx.run_until_parked();
+
+        let (is_open, active_index) = workspace.read_with(cx, |workspace, cx| {
+            let dock = workspace.left_dock().read(cx);
+            (dock.is_open(), dock.active_panel_index())
+        });
+        assert!(is_open);
+        assert_eq!(
+            active_index,
+            Some(1),
+            "activating another entry switches panels"
+        );
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .clone()
+                .update(cx, |activity_bar, cx| {
+                    assert!(activity_bar.activate_entry("ProjectPanel", window, cx));
+                });
+        });
+        cx.run_until_parked();
+
+        let is_open =
+            workspace.read_with(cx, |workspace, cx| workspace.left_dock().read(cx).is_open());
+        assert!(!is_open, "activating the active entry closes the dock");
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace
+                .activity_bar()
+                .clone()
+                .update(cx, |activity_bar, cx| {
+                    activity_bar.move_entry("OutlinePanel", "ProjectPanel", window, cx);
+                });
+        });
+        cx.run_until_parked();
+
+        let keys = workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activity_bar().read(cx).entry_keys(window, cx)
+        });
+        assert_eq!(
+            keys,
+            vec!["OutlinePanel", "ProjectPanel"],
+            "dropping an entry on another takes that entry's slot"
+        );
+        let stored = cx.update(|_, cx| {
+            db::kvp::KeyValueStore::global(cx)
+                .read_kvp(ORDER_KEY)
+                .unwrap()
+                .unwrap()
+        });
+        assert_eq!(stored, r#"["OutlinePanel","ProjectPanel"]"#);
+    }
+}

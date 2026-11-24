@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+
+set -euxo pipefail
+source script/lib/blob-store.sh
+
+# Function for displaying help info
+help_info() {
+  echo "
+Usage: ${0##*/} [options]
+Build a release .tar.gz for Linux.
+
+Options:
+  -h, --help     Display this help and exit.
+  --flatpak      Set ZED_BUNDLE_TYPE=flatpak so that this can be included in system info
+  "
+}
+
+# Parse all arguments manually
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            help_info
+            exit 0
+            ;;
+        --flatpak)
+            export ZED_BUNDLE_TYPE=flatpak
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            help_info
+            exit 1
+            ;;
+        *)
+            echo "Error: Unexpected argument: $1" >&2
+            help_info
+            exit 1
+            ;;
+    esac
+done
+
+export ZED_BUNDLE=true
+
+channel=$(<crates/aaykra/RELEASE_CHANNEL)
+target_dir="${CARGO_TARGET_DIR:-target}"
+
+version="$(script/get-crate-version aaykra)"
+# Set RELEASE_VERSION so it's compiled into GPUI and it knows about the version.
+export RELEASE_VERSION="${version}"
+
+commit=$(git rev-parse HEAD | cut -c 1-7)
+
+version_info=$(rustc --version --verbose)
+host_line=$(echo "$version_info" | grep host)
+target_triple=${host_line#*: }
+musl_triple=${target_triple%-gnu}-musl
+remote_server_triple=${REMOTE_SERVER_TARGET:-"${musl_triple}"}
+rustup_installed=false
+if command -v rustup >/dev/null 2>&1; then
+    rustup_installed=true
+fi
+
+# Generate the licenses first, so they can be baked into the binaries
+script/generate-licenses
+
+if "$rustup_installed"; then
+    rustup target add "$remote_server_triple"
+fi
+
+export CC=${CC:-$(which clang)}
+
+# Build binary in release mode
+# We need lld to link libwebrtc.a successfully on aarch64-linux.
+# NOTE: Since RUSTFLAGS env var overrides all .cargo/config.toml rustflags
+# (see https://github.com/rust-lang/cargo/issues/5376), the
+# [target.aarch64-unknown-linux-gnu] section in config.toml has no effect here.
+if [[ "$(uname -m)" == "aarch64" ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=lld -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
+else
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$ORIGIN/../lib"
+fi
+lld=$("$CC" -print-prog-name=ld.lld)
+lld_version=$("$lld" --version)
+if [[ ! "$lld_version" =~ LLD\ ([0-9]+)\. ]] || (( BASH_REMATCH[1] < 12 )); then
+    echo "Bundling requires LLD 12 or newer for safe ICF; select a matching compiler with CC (e.g. CC=clang-18)." >&2
+    exit 1
+fi
+icf_args=()
+# On aarch64, ICF merges outlined helpers that split a GOT load across functions, so calls land on the wrong slot.
+if [[ "$(uname -m)" != "aarch64" ]]; then
+    icf_args=(-C llvm-args=-addrsig -C link-arg=-Wl,--icf=safe)
+fi
+cargo --config .cargo/bundle-config.toml rustc --release --target "${target_triple}" --package aaykra --bin aaykra -- -C linker="$CC" -C link-arg=-fuse-ld=lld ${icf_args[@]+"${icf_args[@]}"}
+cargo --config .cargo/bundle-config.toml build --release --target "${target_triple}" --package cli
+# Build remote_server in separate invocation to prevent feature unification from other crates
+# from influencing dynamic libraries required by it.
+if [[ "$remote_server_triple" == "$musl_triple" ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
+    musl_cc_var="CC_$(echo "$remote_server_triple" | tr '-' '_')"
+    export "$musl_cc_var"=musl-gcc
+fi
+cargo --config .cargo/bundle-config.toml build --release --target "${remote_server_triple}" --package remote_server
+
+# We use llvm-objcopy because GNU objcopy on older distros (e.g. Ubuntu 20.04)
+# doesn't understand CREL sections produced by newer LLVM.
+llvm-objcopy --strip-unneeded "${target_dir}/${target_triple}/release/aaykra"
+llvm-objcopy --strip-debug --discard-all "${target_dir}/${target_triple}/release/cli"
+llvm-objcopy --strip-debug --discard-all "${target_dir}/${remote_server_triple}/release/remote_server"
+
+# Ensure that remote_server does not depend on libssl nor libcrypto, as we got rid of these deps.
+if ldd "${target_dir}/${remote_server_triple}/release/remote_server" | grep -q 'libcrypto\|libssl'; then
+    if [[ "$remote_server_triple" == *-musl ]]; then
+        echo "Error: remote_server still depends on libssl or libcrypto" && exit 1
+    else
+        echo "Info: Using non-musl remote-server build."
+    fi
+fi
+
+suffix=""
+if [ "$channel" != "stable" ]; then
+  suffix="-$channel"
+fi
+
+# Move everything that should end up in the final package
+# into a temp directory.
+temp_dir=$(mktemp -d)
+aaykra_dir="${temp_dir}/aaykra$suffix.app"
+
+# Binary
+mkdir -p "${aaykra_dir}/bin" "${aaykra_dir}/libexec"
+cp "${target_dir}/${target_triple}/release/aaykra" "${aaykra_dir}/libexec/aaykra-editor"
+cp "${target_dir}/${target_triple}/release/cli" "${aaykra_dir}/bin/aaykra"
+
+# Libs
+# Bundle libstdc++ so older supported systems can run binaries built with our
+# toolchain even when their system libstdc++.so.6 lacks required GLIBCXX symbols.
+#
+# Never bundle the GLib family or its private dependencies: host libraries that
+# get dlopen'd are built against the system GLib, and resolving them against an
+# older bundled copy fails with missing symbols.
+find_libs() {
+    ldd ${target_dir}/${target_triple}/release/aaykra |\
+        cut -d' ' -f3 |\
+        grep -v '\<\(libc.so\|libgcc_s.so\|libm.so\|libpthread.so\|libdl.so\|libasound.so\)' |\
+        grep -v '\<\(libglib-2.0.so\|libgobject-2.0.so\|libgio-2.0.so\|libgmodule-2.0.so\|libpcre.so\|libpcre2-8.so\|libmount.so\|libblkid.so\|libselinux.so\|libffi.so\|libresolv.so\|libz.so\)'
+}
+
+mkdir -p "${aaykra_dir}/lib"
+rm -rf "${aaykra_dir}/lib/*"
+cp $(find_libs) "${aaykra_dir}/lib"
+
+# Icons
+mkdir -p "${aaykra_dir}/share/icons/hicolor/512x512/apps"
+cp "crates/aaykra/resources/app-icon$suffix.png" "${aaykra_dir}/share/icons/hicolor/512x512/apps/aaykra.png"
+mkdir -p "${aaykra_dir}/share/icons/hicolor/1024x1024/apps"
+cp "crates/aaykra/resources/app-icon$suffix@2x.png" "${aaykra_dir}/share/icons/hicolor/1024x1024/apps/aaykra.png"
+
+# .desktop
+export DO_STARTUP_NOTIFY="true"
+export APP_CLI="aaykra"
+export APP_ICON="aaykra"
+export APP_ARGS="%U"
+if [[ "$channel" == "dev" ]]; then
+  export APP_NAME="Aaykra Dev"
+  APP_ID="com.aayushpokhrel.aaykra-dev"
+else
+  export APP_NAME="Aaykra"
+  APP_ID="com.aayushpokhrel.aaykra"
+fi
+
+mkdir -p "${aaykra_dir}/share/applications"
+envsubst < "crates/aaykra/resources/zed.desktop.in" > "${aaykra_dir}/share/applications/$APP_ID.desktop"
+chmod +x "${aaykra_dir}/share/applications/$APP_ID.desktop"
+
+# Copy generated licenses so they'll end up in archive too
+cp "assets/licenses.md" "${aaykra_dir}/licenses.md"
+
+# Create archive out of everything that's in the temp directory
+arch=$(uname -m)
+archive="aaykra-linux-${arch}.tar.gz"
+
+rm -rf "${archive}"
+remove_match="aaykra(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
+ls "${target_dir}/release" | grep -E ${remove_match} | xargs -d "\n" -I {} rm -f "${target_dir}/release/{}" || true
+tar -czvf "${target_dir}/release/$archive" -C ${temp_dir} "aaykra$suffix.app"
+
+gzip -f --stdout --best "${target_dir}/${remote_server_triple}/release/remote_server" > "${target_dir}/aaykra-remote-server-linux-${arch}.gz"

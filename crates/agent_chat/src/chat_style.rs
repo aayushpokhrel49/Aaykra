@@ -1,0 +1,416 @@
+use gpui::{
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, CursorStyle, ElementId, Hsla,
+    IntoElement, ParentElement, Pixels, Rems, RenderOnce, Styled, Window, div, hsla, px, rems,
+    rgb, svg,
+};
+use i18n::{n, t};
+use std::time::Duration;
+use theme::ActiveTheme as _;
+use ui::{Clickable, IconName, IconSize, Toggleable, Tooltip, prelude::*};
+
+const WORKING_ANIMATION_FPS: f32 = 12.;
+
+pub(crate) fn working_animation(period: Duration) -> Animation {
+    Animation::new(period)
+        .repeat()
+        .with_max_fps(WORKING_ANIMATION_FPS)
+}
+
+pub(crate) fn ui(pixels_at_default: f32) -> Rems {
+    rems(pixels_at_default / 16.0)
+}
+
+const INK_HAIRLINE_SCALE: f32 = 1.35;
+
+fn is_dark(cx: &App) -> bool {
+    !cx.theme().appearance.is_light()
+}
+
+pub(crate) fn ink(alpha: f32, cx: &App) -> Hsla {
+    if is_dark(cx) {
+        hsla(0.0, 0.0, 1.0, alpha)
+    } else {
+        hsla(0.0, 0.0, 0.0, alpha)
+    }
+}
+
+/// Hairline ink, scaled up on light so 1px edges stay legible.
+pub(crate) fn hairline(alpha: f32, cx: &App) -> Hsla {
+    if is_dark(cx) {
+        hsla(0.0, 0.0, 1.0, alpha)
+    } else {
+        hsla(0.0, 0.0, 0.0, (alpha * INK_HAIRLINE_SCALE).min(0.5))
+    }
+}
+
+pub(crate) fn wash(alpha: f32, cx: &App) -> Hsla {
+    if is_dark(cx) {
+        hsla(0.0, 0.0, 0.92, alpha)
+    } else {
+        hsla(0.0, 0.0, 0.10, alpha)
+    }
+}
+
+pub(crate) fn page(cx: &App) -> Hsla {
+    cx.theme().colors().background.opacity(1.0)
+}
+
+pub(crate) fn mix(from: Hsla, to: Hsla, amount: f32) -> Hsla {
+    let from = from.to_rgb();
+    let to = to.to_rgb();
+    let amount = amount.clamp(0.0, 1.0);
+    gpui::Rgba {
+        r: lerp(from.r, to.r, amount),
+        g: lerp(from.g, to.g, amount),
+        b: lerp(from.b, to.b, amount),
+        a: lerp(from.a, to.a, amount),
+    }
+    .into()
+}
+
+pub(crate) fn text_faint(cx: &App) -> Hsla {
+    cx.theme().colors().text_placeholder
+}
+
+pub(crate) fn accent(cx: &App) -> Hsla {
+    cx.theme().colors().text_accent
+}
+
+pub(crate) fn selected_row(cx: &App) -> Hsla {
+    if is_dark(cx) {
+        wash(0.11, cx)
+    } else {
+        wash(0.06, cx)
+    }
+}
+
+pub(crate) fn icon(name: IconName, size: Pixels, color: Hsla) -> gpui::Svg {
+    svg()
+        .path(name.path())
+        .flex_none()
+        .size(size)
+        .text_color(color)
+}
+
+pub(crate) fn icon_size_px(pixels: f32, window: &Window) -> IconSize {
+    IconSize::Custom(rems(pixels / f32::from(window.rem_size())))
+}
+
+/// Opaque so the trays tucked behind the composer stay hidden.
+pub(crate) fn composer_surface(cx: &App) -> Hsla {
+    let input = cx.theme().colors().element_background;
+    mix(page(cx), input.opacity(1.0), input.a)
+}
+
+pub(crate) const MENU_ITEM_RADIUS: f32 = 7.;
+
+pub(crate) fn tracked_upper(label: &str) -> String {
+    let mut tracked = String::with_capacity(label.len() * 2);
+    for (index, character) in label.to_uppercase().chars().enumerate() {
+        if index > 0 {
+            tracked.push('\u{200A}');
+        }
+        tracked.push(character);
+    }
+    tracked
+}
+
+pub(crate) fn popover_card(cx: &App) -> gpui::Div {
+    let colors = cx.theme().colors();
+    div()
+        .flex()
+        .flex_col()
+        .border_1()
+        .border_color(colors.border)
+        .rounded(px(12.))
+        .shadow_lg()
+        .bg(colors.elevated_surface_background)
+        .p(px(4.))
+        .gap(px(2.))
+        .overflow_hidden()
+        .text_size(ui(13.))
+        .text_color(colors.text)
+}
+
+#[derive(IntoElement)]
+pub(crate) struct Chip {
+    id: ElementId,
+    child: AnyElement,
+    radius: f32,
+    selected: bool,
+    shrinkable: bool,
+    hover_background: Option<Hsla>,
+    text_colors: Option<(Hsla, Hsla)>,
+    tooltip: Option<SharedString>,
+    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl Chip {
+    pub fn new(id: impl Into<ElementId>, radius: f32, child: impl IntoElement) -> Self {
+        Self {
+            id: id.into(),
+            child: child.into_any_element(),
+            radius,
+            selected: false,
+            shrinkable: false,
+            hover_background: None,
+            text_colors: None,
+            tooltip: None,
+            on_click: None,
+        }
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    pub fn shrinkable(mut self) -> Self {
+        self.shrinkable = true;
+        self
+    }
+
+    pub fn hover_background(mut self, color: Hsla) -> Self {
+        self.hover_background = Some(color);
+        self
+    }
+
+    pub fn text_colors(mut self, rest: Hsla, hover: Hsla) -> Self {
+        self.text_colors = Some((rest, hover));
+        self
+    }
+}
+
+impl Clickable for Chip {
+    fn on_click(mut self, handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+
+    fn cursor_style(self, _: CursorStyle) -> Self {
+        self
+    }
+}
+
+impl Toggleable for Chip {
+    fn toggle_state(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+}
+
+impl RenderOnce for Chip {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let hover = self
+            .hover_background
+            .unwrap_or(cx.theme().colors().element_hover);
+        let text_colors = self.text_colors;
+        div()
+            .id(self.id)
+            .map(|this| {
+                if self.shrinkable {
+                    this.min_w_0()
+                } else {
+                    this.flex_none()
+                }
+            })
+            .rounded(px(self.radius))
+            .cursor_pointer()
+            .when_some(text_colors, |this, (rest, _)| this.text_color(rest))
+            .when(self.selected, |this| this.bg(hover))
+            .hover(move |style| {
+                let style = style.bg(hover);
+                match text_colors {
+                    Some((_, hover_text)) => style.text_color(hover_text),
+                    None => style,
+                }
+            })
+            .child(self.child)
+            .when_some(self.tooltip, |this, text| this.tooltip(Tooltip::text(text)))
+            .when_some(self.on_click, |this, on_click| {
+                this.on_click(move |event, window, cx| on_click(event, window, cx))
+            })
+    }
+}
+
+const GSPIN_TOP_TINT: u32 = 0xB6D3EF;
+const GSPIN_MIDDLE_TINT: u32 = 0xEDB185;
+const GSPIN_BOTTOM_TINT: u32 = 0xF888A0;
+const GSPIN_DIM: f32 = 0.3;
+const GRADIENT_SPIN_MS: u64 = 900;
+const LOGO_PATH: &str = "icons/aaykra_mark.svg";
+const LOGO_ASPECT: f32 = 628. / 644.;
+const LOGO_BANDS: usize = 6;
+
+fn lerp(from: f32, to: f32, t: f32) -> f32 {
+    from + (to - from) * t
+}
+
+fn gspin_opacity(t: f32, dim: f32) -> f32 {
+    let t = t.rem_euclid(1.0);
+    if t < 0.45 {
+        lerp(1.0, dim, t / 0.45)
+    } else if t < 0.92 {
+        dim
+    } else {
+        lerp(dim, 1.0, (t - 0.92) / 0.08)
+    }
+}
+
+fn logo_band_phase(band: usize) -> f32 {
+    (LOGO_BANDS - 1 - band) as f32 / LOGO_BANDS as f32
+}
+
+fn logo_band_tint(band: usize) -> Hsla {
+    let depth = band as f32 / (LOGO_BANDS - 1) as f32;
+    if depth < 0.5 {
+        mix(rgb(GSPIN_TOP_TINT).into(), rgb(GSPIN_MIDDLE_TINT).into(), depth * 2.)
+    } else {
+        mix(
+            rgb(GSPIN_MIDDLE_TINT).into(),
+            rgb(GSPIN_BOTTOM_TINT).into(),
+            depth * 2. - 1.,
+        )
+    }
+}
+
+pub(crate) fn gradient_spinner(id: SharedString, height: f32) -> impl IntoElement {
+    logo_spinner(id, height, logo_band_tint)
+}
+
+pub(crate) fn mono_spinner(id: SharedString, height: f32, tint: Hsla) -> impl IntoElement {
+    logo_spinner(id, height, move |_| tint)
+}
+
+fn logo_spinner(
+    id: SharedString,
+    height: f32,
+    band_tint: impl Fn(usize) -> Hsla,
+) -> impl IntoElement {
+    let width = height * LOGO_ASPECT;
+    let band_height = height / LOGO_BANDS as f32;
+    div()
+        .flex_none()
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .children((0..LOGO_BANDS).map(|band| {
+            let top = band as f32 * band_height;
+            let phase = logo_band_phase(band);
+            div()
+                .absolute()
+                .left_0()
+                .top(px(top))
+                .w(px(width))
+                .h(px(band_height))
+                .overflow_hidden()
+                .child(
+                    svg()
+                        .path(LOGO_PATH)
+                        .absolute()
+                        .left_0()
+                        .top(px(-top))
+                        .w(px(width))
+                        .h(px(height))
+                        .text_color(band_tint(band)),
+                )
+                .with_animation(
+                    ElementId::Name(format!("{id}-{band}").into()),
+                    working_animation(Duration::from_millis(GRADIENT_SPIN_MS)),
+                    move |band, delta| band.opacity(gspin_opacity(delta - phase, GSPIN_DIM)),
+                )
+        }))
+}
+
+pub(crate) const FLAVOUR_WORDS: [&str; 21] = [
+    n!("Reckoning"),
+    n!("Thinking"),
+    n!("Pondering"),
+    n!("Scheming"),
+    n!("Brewing"),
+    n!("Weaving"),
+    n!("Tinkering"),
+    n!("Musing"),
+    n!("Composing"),
+    n!("Sifting"),
+    n!("Untangling"),
+    n!("Distilling"),
+    n!("Sketching"),
+    n!("Plotting"),
+    n!("Riffing"),
+    n!("Combobulating"),
+    n!("Percolating"),
+    n!("Marinating"),
+    n!("Noodling"),
+    n!("Puzzling"),
+    n!("Conjuring"),
+];
+const FLAVOUR_ROTATE_SECS: u64 = 7;
+
+pub(crate) fn flavour_word(seed: u64, elapsed_secs: u64) -> &'static str {
+    let step = elapsed_secs / FLAVOUR_ROTATE_SECS;
+    FLAVOUR_WORDS[(seed.wrapping_add(step) % FLAVOUR_WORDS.len() as u64) as usize]
+}
+
+pub(crate) fn flavour_seed(chat_id: &str) -> u64 {
+    chat_id.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+        (hash ^ byte as u64).wrapping_mul(0x100000001b3)
+    })
+}
+
+pub(crate) fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        t!("{seconds}s", seconds = secs).to_string()
+    } else if secs < 3_600 {
+        t!(
+            "{minutes}m {seconds}s",
+            minutes = secs / 60,
+            seconds = secs % 60
+        )
+        .to_string()
+    } else if secs < 86_400 {
+        t!(
+            "{hours}h {minutes}m",
+            hours = secs / 3_600,
+            minutes = (secs % 3_600) / 60
+        )
+        .to_string()
+    } else {
+        t!(
+            "{days}d {hours}h",
+            days = secs / 86_400,
+            hours = (secs % 86_400) / 3_600
+        )
+        .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_uses_two_units() {
+        assert_eq!(format_elapsed(12), "12s");
+        assert_eq!(format_elapsed(184), "3m 4s");
+        assert_eq!(format_elapsed(3_720), "1h 2m");
+        assert_eq!(format_elapsed(90_000), "1d 1h");
+    }
+
+    #[test]
+    fn spinner_wave_rises_from_the_chin_to_the_antler_tips() {
+        assert_eq!(logo_band_phase(LOGO_BANDS - 1), 0.0);
+        assert!(logo_band_phase(LOGO_BANDS - 1) < logo_band_phase(0));
+        assert_eq!(logo_band_tint(0), rgb(GSPIN_TOP_TINT).into());
+        assert_eq!(logo_band_tint(LOGO_BANDS - 1), rgb(GSPIN_BOTTOM_TINT).into());
+        assert_eq!(gspin_opacity(0.0, GSPIN_DIM), 1.0);
+        assert_eq!(gspin_opacity(0.6, GSPIN_DIM), GSPIN_DIM);
+    }
+
+    #[test]
+    fn flavour_words_rotate_every_seven_seconds() {
+        let seed = flavour_seed("chat-1");
+        assert_eq!(flavour_word(seed, 0), flavour_word(seed, 6));
+        assert_ne!(flavour_word(seed, 0), flavour_word(seed, 7));
+    }
+}

@@ -1,0 +1,1225 @@
+//! Provides `language`-related settings.
+
+use crate::{Buffer, BufferSnapshot, File, LanguageName, LanguageServerName, ModelineSettings};
+use collections::{FxHashMap, HashMap, HashSet};
+use ec4rs::{
+    Properties as EditorconfigProperties,
+    property::{
+        EndOfLine, FinalNewline, IndentSize, IndentStyle, MaxLineLen, TabWidth, TrimTrailingWs,
+    },
+};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use gpui::{App, Modifiers, SharedString};
+use itertools::Itertools;
+use settings::{DocumentFoldingRanges, DocumentSymbols, IntoGpui, SemanticTokens};
+
+pub use settings::{
+    AutoIndentMode, CompletionSettingsContent, ConfiguredLanguageServer, FormatOnSave, Formatter,
+    FormatterList, InlayHintKind, LanguageSettingsContent, LineEndingSetting, LspInsertMode,
+    REST_OF_LANGUAGE_SERVERS, RewrapBehavior, ShowWhitespaceSetting, SoftWrap, WordsCompletionMode,
+};
+use settings::{RegisterSetting, Settings, SettingsLocation, SettingsStore, merge_from::MergeFrom};
+use std::{num::NonZeroU32, sync::Arc};
+use text::ToOffset;
+
+/// Returns the settings for all languages from the provided file.
+pub fn all_language_settings<'a>(
+    file: Option<&'a Arc<dyn File>>,
+    cx: &'a App,
+) -> &'a AllLanguageSettings {
+    let location = file.map(|f| SettingsLocation {
+        worktree_id: f.worktree_id(cx),
+        path: f.path().as_ref(),
+    });
+    AllLanguageSettings::get(location, cx)
+}
+
+/// The settings for all languages.
+#[derive(Debug, Clone, RegisterSetting)]
+pub struct AllLanguageSettings {
+    pub defaults: Arc<LanguageSettings>,
+    languages: HashMap<LanguageName, Arc<LanguageSettings>>,
+    pub file_types: FxHashMap<Arc<str>, (GlobSet, Vec<String>)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhitespaceMap {
+    pub space: SharedString,
+    pub tab: SharedString,
+}
+
+/// The settings for a particular language.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LanguageSettings {
+    /// How many columns a tab should occupy.
+    pub tab_size: NonZeroU32,
+    /// Whether to indent lines using tab characters, as opposed to multiple
+    /// spaces.
+    pub hard_tabs: bool,
+    /// How to soft-wrap long lines of text.
+    pub soft_wrap: settings::SoftWrap,
+    /// The column at which to soft-wrap lines, for buffers where soft-wrap
+    /// is enabled.
+    pub preferred_line_length: u32,
+    /// Whether to show wrap guides (vertical rulers) in the editor.
+    /// Setting this to true will show a guide at the 'preferred_line_length' value
+    /// if softwrap is set to 'preferred_line_length', and will show any
+    /// additional guides as specified by the 'wrap_guides' setting.
+    pub show_wrap_guides: bool,
+    /// Character counts at which to show wrap guides (vertical rulers) in the editor.
+    pub wrap_guides: Vec<usize>,
+    /// Indent guide related settings.
+    pub indent_guides: IndentGuideSettings,
+    /// Whether or not to perform a buffer format before saving.
+    pub format_on_save: FormatOnSave,
+    /// Whether or not to remove any trailing whitespace from lines of a buffer
+    /// before saving it.
+    pub remove_trailing_whitespace_on_save: bool,
+    /// Whether or not to ensure there's a single newline at the end of a buffer
+    /// when saving it.
+    pub ensure_final_newline_on_save: bool,
+    /// How line endings are initialized for new files and normalized during
+    /// format and save.
+    pub line_ending: LineEndingSetting,
+    /// How to perform a buffer format.
+    pub formatter: settings::FormatterList,
+    /// Zed's Prettier integration settings.
+    pub prettier: PrettierSettings,
+    /// Whether to automatically close JSX tags.
+    pub jsx_tag_auto_close: bool,
+    /// Whether to use language servers to provide code intelligence.
+    pub enable_language_server: bool,
+    /// The list of language servers to use (or disable) for this language.
+    ///
+    /// This array should consist of language server IDs, as well as the following
+    /// special tokens:
+    /// - `"!<language_server_id>"` - A language server ID prefixed with a `!` will be disabled.
+    /// - `"..."` - A placeholder to refer to the **rest** of the registered language servers for this language.
+    pub language_servers: Vec<ConfiguredLanguageServer>,
+    /// Controls how semantic tokens from language servers are used for syntax highlighting.
+    pub semantic_tokens: SemanticTokens,
+    /// Controls whether folding ranges from language servers are used instead of
+    /// tree-sitter and indent-based folding.
+    pub document_folding_ranges: DocumentFoldingRanges,
+    /// Controls the source of document symbols used for outlines and breadcrumbs.
+    pub document_symbols: DocumentSymbols,
+    /// Controls where the `editor::Rewrap` action is allowed for this language.
+    ///
+    /// Note: This setting has no effect in Vim mode, as rewrap is already
+    /// allowed everywhere.
+    pub allow_rewrap: RewrapBehavior,
+    /// Whether to show tabs and spaces in the editor.
+    pub show_whitespaces: settings::ShowWhitespaceSetting,
+    /// Visible characters used to render whitespace when show_whitespaces is enabled.
+    pub whitespace_map: WhitespaceMap,
+    /// Whether to start a new line with a comment when a previous line is a comment as well.
+    pub extend_comment_on_newline: bool,
+    /// Whether to continue markdown lists when pressing enter.
+    pub extend_list_on_newline: bool,
+    /// Whether to indent list items when pressing tab after a list marker.
+    pub indent_list_on_tab: bool,
+    /// Inlay hint related settings.
+    pub inlay_hints: InlayHintSettings,
+    /// Whether to automatically close brackets.
+    pub use_autoclose: bool,
+    /// Whether to automatically surround text with brackets.
+    pub use_auto_surround: bool,
+    /// Whether to use additional LSP queries to format (and amend) the code after
+    /// every "trigger" symbol input, defined by LSP server capabilities.
+    pub use_on_type_format: bool,
+    /// Controls automatic indentation behavior when typing.
+    pub auto_indent: AutoIndentMode,
+    /// Whether indentation of pasted content should be adjusted based on the context.
+    pub auto_indent_on_paste: bool,
+    /// Controls how the editor handles the autoclosed characters.
+    pub always_treat_brackets_as_autoclosed: bool,
+    /// Which code actions to run on save
+    pub code_actions_on_format: HashMap<String, bool>,
+    /// Whether to perform linked edits
+    pub linked_edits: bool,
+    /// Task configuration for this language.
+    pub tasks: LanguageTaskSettings,
+    /// Whether to pop the completions menu while typing in an editor without
+    /// explicitly requesting it.
+    pub show_completions_on_input: bool,
+    /// Whether to display inline and alongside documentation for items in the
+    /// completions menu.
+    pub show_completion_documentation: bool,
+    /// Completion settings for this language.
+    pub completions: CompletionSettings,
+    /// Preferred debuggers for this language.
+    pub debuggers: Vec<String>,
+    /// Whether to enable word diff highlighting in the editor.
+    ///
+    /// When enabled, changed words within modified lines are highlighted
+    /// to show exactly what changed.
+    ///
+    /// Default: `true`
+    pub word_diff_enabled: bool,
+    /// Whether to use tree-sitter bracket queries to detect and colorize the brackets in the editor.
+    pub colorize_brackets: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompletionSettings {
+    /// Controls how words are completed.
+    /// For large documents, not all words may be fetched for completion.
+    ///
+    /// Default: `fallback`
+    pub words: WordsCompletionMode,
+    /// How many characters has to be in the completions query to automatically show the words-based completions.
+    /// Before that value, it's still possible to trigger the words-based completion manually with the corresponding editor command.
+    ///
+    /// Default: 3
+    pub words_min_length: usize,
+    /// Whether to fetch LSP completions or not.
+    ///
+    /// Default: true
+    pub lsp: bool,
+    /// When fetching LSP completions, determines how long to wait for a response of a particular server.
+    /// When set to 0, waits indefinitely.
+    ///
+    /// Default: 0
+    pub lsp_fetch_timeout_ms: u64,
+    /// Controls how LSP completions are inserted.
+    ///
+    /// Default: "replace_suffix"
+    pub lsp_insert_mode: LspInsertMode,
+}
+
+/// The settings for indent guides.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndentGuideSettings {
+    /// Whether to display indent guides in the editor.
+    ///
+    /// Default: true
+    pub enabled: bool,
+    /// The width of the indent guides in pixels, between 1 and 10.
+    ///
+    /// Default: 1
+    pub line_width: u32,
+    /// The width of the active indent guide in pixels, between 1 and 10.
+    ///
+    /// Default: 1
+    pub active_line_width: u32,
+    /// Determines how indent guides are colored.
+    ///
+    /// Default: Fixed
+    pub coloring: settings::IndentGuideColoring,
+    /// Determines how indent guide backgrounds are colored.
+    ///
+    /// Default: Disabled
+    pub background_coloring: settings::IndentGuideBackgroundColoring,
+}
+
+impl IndentGuideSettings {
+    /// Returns the clamped line width in pixels for an indent guide based on
+    /// whether it is active, or `None` when line coloring is disabled.
+    pub fn visible_line_width(&self, active: bool) -> Option<u32> {
+        if self.coloring == settings::IndentGuideColoring::Disabled {
+            return None;
+        }
+        let width = if active {
+            self.active_line_width
+        } else {
+            self.line_width
+        };
+        Some(width.clamp(1, 10))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LanguageTaskSettings {
+    /// Extra task variables to set for a particular language.
+    pub variables: HashMap<String, String>,
+    pub enabled: bool,
+    /// Use LSP tasks over Zed language extension ones.
+    /// If no LSP tasks are returned due to error/timeout or regular execution,
+    /// Zed language extension tasks will be used instead.
+    ///
+    /// Other Zed tasks will still be shown:
+    /// * Zed task from either of the task config file
+    /// * Zed task from history (e.g. one-off task was spawned before)
+    pub prefer_lsp: bool,
+}
+
+/// Allows to enable/disable formatting with Prettier
+/// and configure default Prettier, used when no project-level Prettier installation is found.
+/// Prettier formatting is disabled by default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrettierSettings {
+    /// Enables or disables formatting with Prettier for a given language.
+    pub allowed: bool,
+
+    /// Forces Prettier integration to use a specific parser name when formatting files with the language.
+    pub parser: Option<String>,
+
+    /// Forces Prettier integration to use specific plugins when formatting files with the language.
+    /// The default Prettier will be installed with these plugins.
+    pub plugins: HashSet<String>,
+
+    /// Default Prettier options, in the format as in package.json section for Prettier.
+    /// If project installs Prettier via its package.json, these options will be ignored.
+    pub options: HashMap<String, serde_json::Value>,
+}
+
+impl LanguageSettings {
+    pub fn for_buffer(buffer: &Buffer, cx: &App) -> Arc<LanguageSettings> {
+        Self::resolve(Some(buffer), None, cx)
+    }
+
+    pub fn for_buffer_at<D: ToOffset>(
+        buffer: &Buffer,
+        position: D,
+        cx: &App,
+    ) -> Arc<LanguageSettings> {
+        let language = buffer.language_at(position);
+        Self::resolve(Some(buffer), language.map(|l| l.name()).as_ref(), cx)
+    }
+
+    pub fn for_buffer_snapshot(
+        buffer: &BufferSnapshot,
+        offset: Option<usize>,
+        cx: &App,
+    ) -> Arc<LanguageSettings> {
+        let language = if let Some(offset) = offset {
+            buffer.language_at(offset)
+        } else {
+            buffer.language()
+        };
+
+        if let Some(resolved) = buffer.resolved_settings()
+            && language == buffer.language()
+        {
+            return Arc::clone(resolved);
+        }
+
+        let location = buffer.file().map(|f| SettingsLocation {
+            worktree_id: f.worktree_id(cx),
+            path: f.path().as_ref(),
+        });
+
+        let mut settings = AllLanguageSettings::get(location, cx).language(
+            location,
+            language.map(|l| l.name()).as_ref(),
+            cx,
+        );
+
+        if let Some(modeline) = buffer.modeline() {
+            merge_with_modeline(Arc::make_mut(&mut settings), modeline);
+        }
+
+        settings
+    }
+
+    pub fn resolve(
+        buffer: Option<&Buffer>,
+        override_language: Option<&LanguageName>,
+        cx: &App,
+    ) -> Arc<LanguageSettings> {
+        let Some(buffer) = buffer else {
+            return AllLanguageSettings::get(None, cx).language(None, override_language, cx);
+        };
+
+        if let Some(resolved) = buffer.resolved_settings()
+            && override_language.is_none_or(|language| {
+                Some(language) == buffer.language().map(|l| l.name()).as_ref()
+            })
+        {
+            return resolved.clone();
+        }
+
+        Self::resolve_uncached(buffer, override_language, cx)
+    }
+
+    pub(crate) fn resolve_uncached(
+        buffer: &Buffer,
+        override_language: Option<&LanguageName>,
+        cx: &App,
+    ) -> Arc<LanguageSettings> {
+        let location = buffer.file().map(|f| SettingsLocation {
+            worktree_id: f.worktree_id(cx),
+            path: f.path().as_ref(),
+        });
+        let buffer_language = buffer.language().map(|l| l.name());
+        let language_name = override_language.or(buffer_language.as_ref());
+        let mut settings =
+            AllLanguageSettings::get(location, cx).language(location, language_name, cx);
+
+        if let Some(modeline) = buffer.modeline() {
+            merge_with_modeline(Arc::make_mut(&mut settings), modeline);
+        }
+
+        settings
+    }
+
+    /// Returns the customized list of language servers from the list of
+    /// available language servers.
+    pub fn customized_language_servers(
+        &self,
+        available_language_servers: &[LanguageServerName],
+    ) -> Vec<LanguageServerName> {
+        Self::resolve_language_servers(&self.language_servers, available_language_servers)
+    }
+
+    pub(crate) fn resolve_language_servers(
+        configured_language_servers: &[ConfiguredLanguageServer],
+        available_language_servers: &[LanguageServerName],
+    ) -> Vec<LanguageServerName> {
+        let (disabled_language_servers, enabled_language_servers): (
+            Vec<LanguageServerName>,
+            Vec<LanguageServerName>,
+        ) = configured_language_servers
+            .iter()
+            .partition_map(|language_server| {
+                let name = LanguageServerName(language_server.name.clone().into());
+                if language_server.disabled {
+                    itertools::Either::Left(name)
+                } else {
+                    itertools::Either::Right(name)
+                }
+            });
+
+        let rest = available_language_servers
+            .iter()
+            .filter(|&available_language_server| {
+                !disabled_language_servers.contains(available_language_server)
+                    && !enabled_language_servers.contains(available_language_server)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        enabled_language_servers
+            .into_iter()
+            .flat_map(|language_server| {
+                if language_server.0.as_ref() == REST_OF_LANGUAGE_SERVERS {
+                    rest.clone()
+                } else {
+                    vec![language_server]
+                }
+            })
+            .collect::<Vec<_>>()
+    }
+}
+
+// The settings for inlay hints.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct InlayHintSettings {
+    /// Global switch to toggle hints on and off.
+    ///
+    /// Default: false
+    pub enabled: bool,
+    /// Global switch to toggle inline values on and off when debugging.
+    ///
+    /// Default: true
+    pub show_value_hints: bool,
+    /// Whether type hints should be shown.
+    ///
+    /// Default: true
+    pub show_type_hints: bool,
+    /// Whether parameter hints should be shown.
+    ///
+    /// Default: true
+    pub show_parameter_hints: bool,
+    /// Whether other hints should be shown.
+    ///
+    /// Default: true
+    pub show_other_hints: bool,
+    /// Whether to show a background for inlay hints.
+    ///
+    /// If set to `true`, the background will use the `hint.background` color
+    /// from the current theme.
+    ///
+    /// Default: false
+    pub show_background: bool,
+    /// Whether or not to debounce inlay hints updates after buffer edits.
+    ///
+    /// Set to 0 to disable debouncing.
+    ///
+    /// Default: 700
+    pub edit_debounce_ms: u64,
+    /// Whether or not to debounce inlay hints updates after buffer scrolls.
+    ///
+    /// Set to 0 to disable debouncing.
+    ///
+    /// Default: 50
+    pub scroll_debounce_ms: u64,
+    /// Toggles inlay hints (hides or shows) when the user presses the modifiers specified.
+    /// If only a subset of the modifiers specified is pressed, hints are not toggled.
+    /// If no modifiers are specified, this is equivalent to `None`.
+    ///
+    /// Default: None
+    pub toggle_on_modifiers_press: Option<Modifiers>,
+}
+
+impl InlayHintSettings {
+    /// Returns the kinds of inlay hints that are enabled based on the settings.
+    pub fn enabled_inlay_hint_kinds(&self) -> HashSet<Option<InlayHintKind>> {
+        let mut kinds = HashSet::default();
+        if self.show_type_hints {
+            kinds.insert(Some(InlayHintKind::Type));
+        }
+        if self.show_parameter_hints {
+            kinds.insert(Some(InlayHintKind::Parameter));
+        }
+        if self.show_other_hints {
+            kinds.insert(None);
+        }
+        kinds
+    }
+}
+
+impl AllLanguageSettings {
+    /// Returns the [`LanguageSettings`] for the language with the specified name.
+    pub fn language(
+        &self,
+        location: Option<SettingsLocation<'_>>,
+        language_name: Option<&LanguageName>,
+        cx: &App,
+    ) -> Arc<LanguageSettings> {
+        let settings = language_name
+            .and_then(|name| self.languages.get(name))
+            .unwrap_or(&self.defaults);
+
+        let editorconfig_properties = location.and_then(|location| {
+            cx.global::<SettingsStore>()
+                .editorconfig_store
+                .read(cx)
+                .properties(location.worktree_id, location.path)
+        });
+        if let Some(editorconfig_properties) = editorconfig_properties {
+            let mut settings = (**settings).clone();
+            merge_with_editorconfig(&mut settings, &editorconfig_properties);
+            Arc::new(settings)
+        } else {
+            Arc::clone(settings)
+        }
+    }
+}
+
+fn merge_with_modeline(settings: &mut LanguageSettings, modeline: &ModelineSettings) {
+    let show_whitespaces = modeline.show_trailing_whitespace.and_then(|v| {
+        if v {
+            Some(ShowWhitespaceSetting::Trailing)
+        } else {
+            None
+        }
+    });
+
+    settings
+        .tab_size
+        .merge_from_option(modeline.tab_size.as_ref());
+    settings
+        .hard_tabs
+        .merge_from_option(modeline.hard_tabs.as_ref());
+    settings
+        .preferred_line_length
+        .merge_from_option(modeline.preferred_line_length.map(u32::from).as_ref());
+    let auto_indent_mode = modeline.auto_indent.map(|enabled| {
+        if enabled {
+            AutoIndentMode::SyntaxAware
+        } else {
+            AutoIndentMode::None
+        }
+    });
+    settings
+        .auto_indent
+        .merge_from_option(auto_indent_mode.as_ref());
+    settings
+        .show_whitespaces
+        .merge_from_option(show_whitespaces.as_ref());
+    settings
+        .ensure_final_newline_on_save
+        .merge_from_option(modeline.ensure_final_newline.as_ref());
+}
+
+fn merge_with_editorconfig(settings: &mut LanguageSettings, cfg: &EditorconfigProperties) {
+    let preferred_line_length = cfg.get::<MaxLineLen>().ok().and_then(|v| match v {
+        MaxLineLen::Value(u) => Some(u as u32),
+        MaxLineLen::Off => None,
+    });
+    let tab_size = cfg.get::<IndentSize>().ok().and_then(|v| match v {
+        IndentSize::Value(u) => NonZeroU32::new(u as u32),
+        IndentSize::UseTabWidth => cfg.get::<TabWidth>().ok().and_then(|w| match w {
+            TabWidth::Value(u) => NonZeroU32::new(u as u32),
+        }),
+    });
+    let hard_tabs = cfg
+        .get::<IndentStyle>()
+        .map(|v| v.eq(&IndentStyle::Tabs))
+        .ok();
+    let ensure_final_newline_on_save = cfg
+        .get::<FinalNewline>()
+        .map(|v| match v {
+            FinalNewline::Value(b) => b,
+        })
+        .ok();
+    let remove_trailing_whitespace_on_save = cfg
+        .get::<TrimTrailingWs>()
+        .map(|v| match v {
+            TrimTrailingWs::Value(b) => b,
+        })
+        .ok();
+    let line_ending = cfg.get::<EndOfLine>().ok().and_then(|v| match v {
+        EndOfLine::Lf => Some(LineEndingSetting::EnforceLf),
+        EndOfLine::CrLf => Some(LineEndingSetting::EnforceCrlf),
+        EndOfLine::Cr => None,
+    });
+
+    settings
+        .preferred_line_length
+        .merge_from_option(preferred_line_length.as_ref());
+    settings.tab_size.merge_from_option(tab_size.as_ref());
+    settings.hard_tabs.merge_from_option(hard_tabs.as_ref());
+    // Avoid re-enabling destructive whitespace trimming when Zed settings have
+    // disabled it, e.g. for Markdown hard breaks.
+    if !matches!(remove_trailing_whitespace_on_save, Some(true))
+        || settings.remove_trailing_whitespace_on_save
+    {
+        settings
+            .remove_trailing_whitespace_on_save
+            .merge_from_option(remove_trailing_whitespace_on_save.as_ref());
+    }
+    settings
+        .ensure_final_newline_on_save
+        .merge_from_option(ensure_final_newline_on_save.as_ref());
+    settings.line_ending.merge_from_option(line_ending.as_ref());
+}
+
+impl settings::Settings for AllLanguageSettings {
+    fn from_settings(content: &settings::SettingsContent) -> Self {
+        let all_languages = &content.project.all_languages;
+
+        fn load_from_content(settings: LanguageSettingsContent) -> LanguageSettings {
+            let inlay_hints = settings.inlay_hints.unwrap();
+            let completions = settings.completions.unwrap();
+            let prettier = settings.prettier.unwrap();
+            let indent_guides = settings.indent_guides.unwrap();
+            let tasks = settings.tasks.unwrap();
+            let whitespace_map = settings.whitespace_map.unwrap();
+
+            LanguageSettings {
+                tab_size: settings.tab_size.unwrap(),
+                hard_tabs: settings.hard_tabs.unwrap(),
+                soft_wrap: settings.soft_wrap.unwrap(),
+                preferred_line_length: settings.preferred_line_length.unwrap(),
+                show_wrap_guides: settings.show_wrap_guides.unwrap(),
+                wrap_guides: settings.wrap_guides.unwrap(),
+                indent_guides: IndentGuideSettings {
+                    enabled: indent_guides.enabled.unwrap(),
+                    line_width: indent_guides.line_width.unwrap(),
+                    active_line_width: indent_guides.active_line_width.unwrap(),
+                    coloring: indent_guides.coloring.unwrap(),
+                    background_coloring: indent_guides.background_coloring.unwrap(),
+                },
+                format_on_save: settings.format_on_save.unwrap(),
+                remove_trailing_whitespace_on_save: settings
+                    .remove_trailing_whitespace_on_save
+                    .unwrap(),
+                ensure_final_newline_on_save: settings.ensure_final_newline_on_save.unwrap(),
+                line_ending: settings.line_ending.unwrap(),
+                formatter: settings.formatter.unwrap(),
+                prettier: PrettierSettings {
+                    allowed: prettier.allowed.unwrap(),
+                    parser: prettier.parser.filter(|parser| !parser.is_empty()),
+                    plugins: prettier.plugins.unwrap_or_default(),
+                    options: prettier.options.unwrap_or_default(),
+                },
+                jsx_tag_auto_close: settings.jsx_tag_auto_close.unwrap().enabled.unwrap(),
+                enable_language_server: settings.enable_language_server.unwrap(),
+                language_servers: settings.language_servers.unwrap(),
+                semantic_tokens: settings.semantic_tokens.unwrap(),
+                document_folding_ranges: settings.document_folding_ranges.unwrap(),
+                document_symbols: settings.document_symbols.unwrap(),
+                allow_rewrap: settings.allow_rewrap.unwrap(),
+                show_whitespaces: settings.show_whitespaces.unwrap(),
+                whitespace_map: WhitespaceMap {
+                    space: SharedString::new(whitespace_map.space.unwrap().to_string()),
+                    tab: SharedString::new(whitespace_map.tab.unwrap().to_string()),
+                },
+                extend_comment_on_newline: settings.extend_comment_on_newline.unwrap(),
+                extend_list_on_newline: settings.extend_list_on_newline.unwrap(),
+                indent_list_on_tab: settings.indent_list_on_tab.unwrap(),
+                inlay_hints: InlayHintSettings {
+                    enabled: inlay_hints.enabled.unwrap(),
+                    show_value_hints: inlay_hints.show_value_hints.unwrap(),
+                    show_type_hints: inlay_hints.show_type_hints.unwrap(),
+                    show_parameter_hints: inlay_hints.show_parameter_hints.unwrap(),
+                    show_other_hints: inlay_hints.show_other_hints.unwrap(),
+                    show_background: inlay_hints.show_background.unwrap(),
+                    edit_debounce_ms: inlay_hints.edit_debounce_ms.unwrap(),
+                    scroll_debounce_ms: inlay_hints.scroll_debounce_ms.unwrap(),
+                    toggle_on_modifiers_press: inlay_hints
+                        .toggle_on_modifiers_press
+                        .map(|m| m.into_gpui()),
+                },
+                use_autoclose: settings.use_autoclose.unwrap(),
+                use_auto_surround: settings.use_auto_surround.unwrap(),
+                use_on_type_format: settings.use_on_type_format.unwrap(),
+                auto_indent: settings.auto_indent.unwrap(),
+                auto_indent_on_paste: settings.auto_indent_on_paste.unwrap(),
+                always_treat_brackets_as_autoclosed: settings
+                    .always_treat_brackets_as_autoclosed
+                    .unwrap(),
+                code_actions_on_format: settings.code_actions_on_format.unwrap(),
+                linked_edits: settings.linked_edits.unwrap(),
+                tasks: LanguageTaskSettings {
+                    variables: tasks.variables.unwrap_or_default(),
+                    enabled: tasks.enabled.unwrap(),
+                    prefer_lsp: tasks.prefer_lsp.unwrap(),
+                },
+                show_completions_on_input: settings.show_completions_on_input.unwrap(),
+                show_completion_documentation: settings.show_completion_documentation.unwrap(),
+                colorize_brackets: settings.colorize_brackets.unwrap(),
+                completions: CompletionSettings {
+                    words: completions.words.unwrap(),
+                    words_min_length: completions.words_min_length.unwrap() as usize,
+                    lsp: completions.lsp.unwrap(),
+                    lsp_fetch_timeout_ms: completions.lsp_fetch_timeout_ms.unwrap(),
+                    lsp_insert_mode: completions.lsp_insert_mode.unwrap(),
+                },
+                debuggers: settings.debuggers.unwrap(),
+                word_diff_enabled: settings.word_diff_enabled.unwrap(),
+            }
+        }
+
+        let default_language_settings = Arc::new(load_from_content(all_languages.defaults.clone()));
+
+        let mut languages = HashMap::default();
+        for (language_name, settings) in &all_languages.languages.0 {
+            let mut language_settings = all_languages.defaults.clone();
+            settings::merge_from::MergeFrom::merge_from(&mut language_settings, settings);
+            languages.insert(
+                LanguageName(language_name.clone().into()),
+                Arc::new(load_from_content(language_settings)),
+            );
+        }
+
+        let mut file_types: FxHashMap<Arc<str>, (GlobSet, Vec<String>)> = FxHashMap::default();
+
+        for (language, patterns) in all_languages.file_types.iter().flatten() {
+            let mut builder = GlobSetBuilder::new();
+
+            for pattern in &patterns.0 {
+                match Glob::new(pattern) {
+                    Ok(glob) => {
+                        builder.add(glob);
+                    }
+                    Err(error) => {
+                        log::error!(
+                            "Failed to parse a `file_types` pattern for {language}. Skipping this pattern:\n\n{error}"
+                        );
+                    }
+                }
+            }
+
+            let matcher = builder.build().unwrap_or_else(|error| {
+                log::error!(
+                    "Failed to compile `file_types` patterns for {language}. Using an empty matcher:\n\n{error}"
+                );
+                GlobSet::empty()
+            });
+            file_types.insert(
+                language.clone(),
+                (matcher, patterns.0.iter().cloned().collect()),
+            );
+        }
+
+        Self {
+            defaults: default_language_settings,
+            languages,
+            file_types,
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct JsxTagAutoCloseSettings {
+    /// Enables or disables auto-closing of JSX tags.
+    pub enabled: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use settings::{LocalSettingsKind, LocalSettingsPath, WorktreeId};
+    use util::rel_path::rel_path;
+
+    #[gpui::test]
+    fn test_file_types_preserves_valid_patterns(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut store = SettingsStore::new(cx, &settings::default_settings());
+            store.register_setting::<AllLanguageSettings>();
+
+            for patterns in [
+                vec!["*.rs", "[", "config.*"],
+                vec!["[", "{"],
+                vec![],
+                vec!["*.rs", "config.*"],
+            ] {
+                store
+                    .set_user_settings(
+                        &serde_json::json!({
+                            "file_types": {
+                                "Python": ["*.py"],
+                                "Rust": patterns,
+                            },
+                        })
+                        .to_string(),
+                        cx,
+                    )
+                    .unwrap();
+
+                let settings = store.get::<AllLanguageSettings>(None);
+                let (matcher, sources) = settings.file_types.get("Rust").unwrap();
+                assert_eq!(sources, &patterns);
+                assert_eq!(matcher.is_match("main.rs"), patterns.contains(&"*.rs"));
+                assert_eq!(
+                    matcher.is_match("config.custom"),
+                    patterns.contains(&"config.*")
+                );
+                assert!(!matcher.is_match("main.py"));
+                assert!(!matcher.is_match("unrelated.txt"));
+                assert!(!matcher.is_match("["));
+                assert!(!matcher.is_match("{"));
+                assert_eq!(matcher.is_empty(), !patterns.contains(&"*.rs"));
+
+                let (matcher, sources) = settings.file_types.get("Python").unwrap();
+                assert_eq!(sources, &["*.py"]);
+                assert!(matcher.is_match("main.py"));
+                assert!(!matcher.is_match("main.rs"));
+                assert!(!matcher.is_match("config.custom"));
+            }
+        });
+    }
+
+    #[test]
+    fn test_resolve_language_servers() {
+        fn language_server_names(names: &[&str]) -> Vec<LanguageServerName> {
+            names
+                .iter()
+                .copied()
+                .map(|name| LanguageServerName(name.to_string().into()))
+                .collect::<Vec<_>>()
+        }
+
+        let available_language_servers = language_server_names(&[
+            "typescript-language-server",
+            "biome",
+            "deno",
+            "eslint",
+            "tailwind",
+        ]);
+
+        // A value of just `["..."]` is the same as taking all of the available language servers.
+        assert_eq!(
+            LanguageSettings::resolve_language_servers(
+                &[REST_OF_LANGUAGE_SERVERS.into()],
+                &available_language_servers,
+            ),
+            available_language_servers
+        );
+
+        // Referencing one of the available language servers will change its order.
+        assert_eq!(
+            LanguageSettings::resolve_language_servers(
+                &[
+                    "biome".into(),
+                    REST_OF_LANGUAGE_SERVERS.into(),
+                    "deno".into()
+                ],
+                &available_language_servers
+            ),
+            language_server_names(&[
+                "biome",
+                "typescript-language-server",
+                "eslint",
+                "tailwind",
+                "deno",
+            ])
+        );
+
+        // Negating an available language server removes it from the list.
+        assert_eq!(
+            LanguageSettings::resolve_language_servers(
+                &[
+                    "deno".into(),
+                    "!typescript-language-server".into(),
+                    "!biome".into(),
+                    REST_OF_LANGUAGE_SERVERS.into()
+                ],
+                &available_language_servers
+            ),
+            language_server_names(&["deno", "eslint", "tailwind"])
+        );
+
+        // Adding a language server not in the list of available language servers adds it to the list.
+        assert_eq!(
+            LanguageSettings::resolve_language_servers(
+                &[
+                    "my-cool-language-server".into(),
+                    REST_OF_LANGUAGE_SERVERS.into()
+                ],
+                &available_language_servers
+            ),
+            language_server_names(&[
+                "my-cool-language-server",
+                "typescript-language-server",
+                "biome",
+                "deno",
+                "eslint",
+                "tailwind",
+            ])
+        );
+    }
+
+    #[gpui::test]
+    fn test_language_servers_across_settings_files(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut store = SettingsStore::new(cx, &settings::default_settings());
+            store.register_setting::<AllLanguageSettings>();
+
+            let worktree_id = WorktreeId::from_usize(1);
+            let root = LocalSettingsPath::InWorktree(rel_path("root").into());
+            let subdir = LocalSettingsPath::InWorktree(rel_path("root/subdir").into());
+            let root_location = Some(SettingsLocation {
+                worktree_id,
+                path: rel_path("root/a.ts"),
+            });
+            let subdir_location = Some(SettingsLocation {
+                worktree_id,
+                path: rel_path("root/subdir/b.ts"),
+            });
+
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["vtsls", "eslint"]),
+                "default settings should disable typescript-language-server for TypeScript"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["typescript-language-server", "vtsls", "eslint"]),
+            );
+
+            store
+                .set_user_settings(r#"{"language_servers": ["!vtsls", "..."]}"#, cx)
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["vtsls", "eslint"]),
+                "the per-language list should fully replace the user's global list"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["typescript-language-server", "eslint"]),
+                "user's global disable should apply to languages without their own list"
+            );
+
+            store
+                .set_local_settings(
+                    worktree_id,
+                    root.clone(),
+                    LocalSettingsKind::Settings,
+                    Some(r#"{"language_servers": ["..."]}"#),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "Rust"),
+                servers(&["typescript-language-server", "vtsls", "eslint"]),
+                "project settings enabling all servers should undo the user's global disable (#61524)"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["typescript-language-server", "eslint"]),
+                "user's global disable should still apply outside of the project"
+            );
+
+            store
+                .set_local_settings(
+                    worktree_id,
+                    root.clone(),
+                    LocalSettingsKind::Settings,
+                    Some(r#"{"language_servers": ["!eslint", "..."]}"#),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "Rust"),
+                servers(&["typescript-language-server", "vtsls"]),
+                "project's global list should replace the user's global list"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "TypeScript"),
+                servers(&["vtsls", "eslint"]),
+                "the per-language list should fully replace the project's global list"
+            );
+
+            store
+                .set_local_settings(
+                    worktree_id,
+                    subdir.clone(),
+                    LocalSettingsKind::Settings,
+                    Some(r#"{"language_servers": ["..."]}"#),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, subdir_location, "Rust"),
+                servers(&["typescript-language-server", "vtsls", "eslint"]),
+                "nested project settings should replace the outer global list"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "Rust"),
+                servers(&["typescript-language-server", "vtsls"]),
+            );
+            store
+                .set_local_settings(worktree_id, subdir, LocalSettingsKind::Settings, None, cx)
+                .unwrap();
+
+            store
+                .set_local_settings(
+                    worktree_id,
+                    root.clone(),
+                    LocalSettingsKind::Settings,
+                    Some(
+                        r#"{"languages": {"TypeScript": {"language_servers": ["vtsls", "..."]}}}"#,
+                    ),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "TypeScript"),
+                servers(&["vtsls", "typescript-language-server", "eslint"]),
+                "project's per-language configuration should override the user's global disable"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "Rust"),
+                servers(&["typescript-language-server", "eslint"]),
+                "user's global disable should still apply to other languages"
+            );
+
+            store
+                .set_user_settings(
+                    r#"{
+                        "language_servers": ["!vtsls", "..."],
+                        "languages": {"TypeScript": {"language_servers": ["vtsls", "..."]}}
+                    }"#,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["vtsls", "typescript-language-server", "eslint"]),
+                "per-language configuration should win over a global disable from the same file"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["typescript-language-server", "eslint"]),
+            );
+
+            store
+                .set_local_settings(
+                    worktree_id,
+                    root.clone(),
+                    LocalSettingsKind::Settings,
+                    Some(r#"{"language_servers": ["!vtsls", "..."]}"#),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "TypeScript"),
+                servers(&["vtsls", "typescript-language-server", "eslint"]),
+                "user's per-language list should win over the project's global disable"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "Rust"),
+                servers(&["typescript-language-server", "eslint"]),
+                "project's global disable should still apply to languages without their own list"
+            );
+
+            store
+                .set_user_settings(
+                    r#"{"languages": {"JavaScript": {"language_servers": ["!vtsls", "..."]}}}"#,
+                    cx,
+                )
+                .unwrap();
+            store
+                .set_local_settings(
+                    worktree_id,
+                    root,
+                    LocalSettingsKind::Settings,
+                    Some(r#"{"languages": {"JavaScript": {"language_servers": ["..."]}}}"#),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "JavaScript"),
+                servers(&["typescript-language-server", "vtsls", "eslint"]),
+                "project's per-language list should re-enable a server disabled by the user (#61524)"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "JavaScript"),
+                servers(&["typescript-language-server", "eslint"]),
+                "user's per-language disable should still apply outside of the project"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_language_servers_combined_restrictions(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let mut store = SettingsStore::new(cx, &settings::default_settings());
+            store.register_setting::<AllLanguageSettings>();
+
+            let worktree_id = WorktreeId::from_usize(1);
+            let root = LocalSettingsPath::InWorktree(rel_path("root").into());
+            let root_location = Some(SettingsLocation {
+                worktree_id,
+                path: rel_path("root/a.ts"),
+            });
+
+            store
+                .set_user_settings(r#"{"language_servers": ["!vtsls", "..."]}"#, cx)
+                .unwrap();
+            store
+                .set_local_settings(
+                    worktree_id,
+                    root,
+                    LocalSettingsKind::Settings,
+                    Some(r#"{"language_servers": ["!eslint", "..."]}"#),
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "Rust"),
+                servers(&["typescript-language-server", "vtsls"]),
+                "global lists replace wholesale: disables from different files must not accumulate"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["typescript-language-server", "eslint"]),
+                "user's own disable should still apply outside of the project"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, root_location, "TypeScript"),
+                servers(&["vtsls", "eslint"]),
+                "a language with its own list should ignore global lists from every file"
+            );
+
+            store
+                .set_user_settings(r#"{"language_servers": ["...", "!vtsls"]}"#, cx)
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["typescript-language-server", "eslint"]),
+                "the position of a disabled entry relative to '...' should not matter"
+            );
+
+            store
+                .set_user_settings(r#"{"language_servers": ["eslint", "..."]}"#, cx)
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["eslint", "typescript-language-server", "vtsls"]),
+                "the position of '...' should determine the priority order of enabled servers"
+            );
+
+            store
+                .set_user_settings(r#"{"language_servers": ["eslint"]}"#, cx)
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["eslint"]),
+                "a global list without '...' should be exhaustive for languages without their own list"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["vtsls", "eslint"]),
+                "a global list, exhaustive or not, never applies to languages with their own list"
+            );
+
+            store
+                .set_user_settings(
+                    r#"{
+                        "language_servers": ["!eslint", "..."],
+                        "languages": {"TypeScript": {"language_servers": ["vtsls", "..."]}}
+                    }"#,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["vtsls", "typescript-language-server", "eslint"]),
+                "authoring a per-language list opts the language out of the global list entirely"
+            );
+            assert_eq!(
+                resolved_language_servers(&store, None, "Rust"),
+                servers(&["typescript-language-server", "vtsls"]),
+            );
+
+            // Issue #60763: to disable a server that the shipped list explicitly
+            // enables, the spelling is per-language, restating the shipped
+            // exclusions.
+            store
+                .set_user_settings(
+                    r#"{"languages": {"TypeScript": {"language_servers": ["!typescript-language-server", "!vtsls", "..."]}}}"#,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["eslint"]),
+                "a per-language disable should win over the shipped explicit enable"
+            );
+            store
+                .set_user_settings(
+                    r#"{"languages": {"TypeScript": {"language_servers": ["!vtsls", "..."]}}}"#,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["typescript-language-server", "eslint"]),
+                "a per-language list not restating the shipped exclusions should lift them"
+            );
+
+            store
+                .set_user_settings(
+                    r#"{"languages": {"TypeScript": {"language_servers": ["eslint"]}}}"#,
+                    cx,
+                )
+                .unwrap();
+            assert_eq!(
+                resolved_language_servers(&store, None, "TypeScript"),
+                servers(&["eslint"]),
+                "an exhaustive per-language list should pin exactly the listed servers"
+            );
+        });
+    }
+
+    fn servers(names: &[&str]) -> Vec<LanguageServerName> {
+        names
+            .iter()
+            .map(|name| LanguageServerName(name.to_string().into()))
+            .collect::<Vec<_>>()
+    }
+
+    fn resolved_language_servers(
+        store: &SettingsStore,
+        location: Option<SettingsLocation>,
+        language: &str,
+    ) -> Vec<LanguageServerName> {
+        let all_settings = store.get::<AllLanguageSettings>(location);
+        let language_settings = all_settings
+            .languages
+            .get(&LanguageName::new(language))
+            .unwrap_or(&all_settings.defaults);
+        language_settings.customized_language_servers(&servers(&[
+            "typescript-language-server",
+            "vtsls",
+            "eslint",
+        ]))
+    }
+}

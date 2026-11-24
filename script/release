@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+
+# Cuts a release: bumps the version, dates the changelog, commits, tags, and
+# pushes. Pushing the tag starts the release workflow.
+#
+# Usage: script/release 1.0.8 [--no-push]
+
+set -euo pipefail
+
+version=${1:?usage: script/release <version> [--no-push]}
+push=true
+if [[ "${2:-}" == "--no-push" ]]; then
+  push=false
+elif [[ -n "${2:-}" ]]; then
+  echo "unknown argument: $2" >&2
+  exit 1
+fi
+
+cd "$(dirname "$0")/.."
+
+manifest=crates/aaykra/Cargo.toml
+changelog=.github/release/CHANGELOG.md
+tag="v$version"
+
+fail() {
+  echo "error: $1" >&2
+  exit 1
+}
+
+if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  fail "version must look like 1.2.3, got '$version'"
+fi
+
+current=$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -1)
+if [[ "$(printf '%s\n%s\n' "$current" "$version" | sort -V | tail -1)" != "$version" || "$current" == "$version" ]]; then
+  fail "version $version is not newer than the current version $current"
+fi
+
+if [[ "$(git branch --show-current)" != "main" ]]; then
+  fail "releases are cut from main, current branch is $(git branch --show-current)"
+fi
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  fail "working tree is not clean; commit or stash your changes first"
+fi
+
+git fetch --quiet origin
+if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+  fail "main is not in sync with origin/main; pull or push first"
+fi
+
+if git rev-parse --quiet --verify "refs/tags/$tag" >/dev/null; then
+  fail "tag $tag already exists locally"
+fi
+if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+  fail "tag $tag already exists on origin"
+fi
+
+if awk -v version="$version" '/^## / && $2 == version { found = 1 } END { exit !found }' "$changelog"; then
+  fail "$changelog already has a section for $version"
+fi
+
+if ! script/changelog-section Unreleased >/dev/null 2>&1; then
+  fail "$changelog has no entries under Unreleased; add the release notes first"
+fi
+
+today=$(date +%F)
+awk -v heading="## $version - $today" '
+  /^## Unreleased$/ && !done {
+    print
+    print ""
+    print heading
+    done = 1
+    next
+  }
+  { print }
+' "$changelog" > "$changelog.tmp"
+mv "$changelog.tmp" "$changelog"
+
+sed "s/^version = \"$current\"/version = \"$version\"/" "$manifest" > "$manifest.tmp"
+mv "$manifest.tmp" "$manifest"
+
+cargo update --quiet --package aaykra --offline
+
+echo "Release notes for $version:"
+script/changelog-section "$version" | sed 's/^/  /'
+echo
+
+git add "$manifest" Cargo.lock "$changelog"
+git commit --quiet -m "Bump to $version"
+git tag "$tag"
+echo "Committed $(git rev-parse --short HEAD) and tagged $tag."
+
+if [[ "$push" == false ]]; then
+  echo "Not pushing. When ready: git push origin main && git push origin $tag"
+  exit 0
+fi
+
+git push --quiet origin main
+git push --quiet origin "$tag"
+echo "Pushed. Watch the release at https://github.com/aayushpokhrel49/aaykra/actions/workflows/release.yml"

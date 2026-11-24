@@ -1,0 +1,897 @@
+#![allow(missing_docs)]
+
+use crate::schema::{status_colors_refinement, syntax_overrides, theme_colors_refinement};
+use crate::{merge_accent_colors, merge_player_colors};
+use collections::HashMap;
+use gpui::{
+    App, Context, Font, FontFallbacks, FontStyle, Global, Pixels, SharedString, Subscription,
+    Window, px,
+};
+use refineable::Refineable;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+pub use settings::{FontFamilyName, IconThemeName, ThemeAppearanceMode, ThemeName};
+use settings::{IntoGpui, RegisterSetting, Settings, SettingsContent};
+use std::sync::Arc;
+use theme::{
+    Appearance, SYMBOLS_ICON_THEME_LIGHT_NAME, SYMBOLS_ICON_THEME_NAME, SyntaxTheme, Theme,
+    UiDensity,
+};
+
+const MIN_FONT_SIZE: Pixels = px(6.0);
+const MAX_FONT_SIZE: Pixels = px(100.0);
+const MIN_LINE_HEIGHT: f32 = 1.0;
+
+pub(crate) fn ui_density_from_settings(val: settings::UiDensity) -> UiDensity {
+    match val {
+        settings::UiDensity::Compact => UiDensity::Compact,
+        settings::UiDensity::Default => UiDensity::Default,
+        settings::UiDensity::Comfortable => UiDensity::Comfortable,
+    }
+}
+
+pub fn appearance_to_mode(appearance: Appearance) -> ThemeAppearanceMode {
+    match appearance {
+        Appearance::Light => ThemeAppearanceMode::Light,
+        Appearance::Dark => ThemeAppearanceMode::Dark,
+    }
+}
+
+/// Customizable settings for the UI and theme system.
+#[derive(Clone, PartialEq, RegisterSetting)]
+pub struct ThemeSettings {
+    /// The UI font size. Determines the size of text in the UI,
+    /// as well as the size of a [gpui::Rems] unit.
+    ///
+    /// Changing this will impact the size of all UI elements.
+    ui_font_size: Pixels,
+    /// The language of the UI, with `system` already resolved.
+    pub ui_language: i18n::Language,
+    /// Whether the UI language was left to follow the system.
+    pub ui_language_follows_system: bool,
+    /// The font used for UI elements.
+    pub ui_font: Font,
+    /// The font size used for buffers, and the terminal.
+    ///
+    /// The terminal font size can be overridden using it's own setting.
+    buffer_font_size: Pixels,
+    /// The font used for buffers, and the terminal.
+    ///
+    /// The terminal font family can be overridden using it's own setting.
+    pub buffer_font: Font,
+    git_commit_buffer_font_size: Option<Pixels>,
+    /// The font family to use for rendering in the markdown preview.
+    /// Falls back to the UI font family if unset.
+    markdown_preview_font_family: Option<SharedString>,
+    /// The font family to use for code in the markdown preview.
+    /// Falls back to the buffer font family if unset.
+    markdown_preview_code_font_family: Option<SharedString>,
+    /// The font size to use for rendering in the markdown preview.
+    /// Falls back to the UI font size if unset.
+    markdown_preview_font_size: Option<Pixels>,
+    /// The theme to use for the markdown preview.
+    /// Falls back to the main editor theme if unset.
+    pub markdown_preview_theme: Option<ThemeSelection>,
+    /// The line height for buffers, and the terminal.
+    ///
+    /// Changing this may affect the spacing of some UI elements.
+    ///
+    /// The terminal font family can be overridden using it's own setting.
+    pub buffer_line_height: BufferLineHeight,
+    /// The current theme selection.
+    pub theme: ThemeSelection,
+    /// Manual overrides for the active theme.
+    ///
+    /// Note: This setting is still experimental. See [this tracking issue](https://github.com/zed-industries/zed/issues/18078)
+    pub experimental_theme_overrides: Option<settings::ThemeStyleContent>,
+    /// Manual overrides per theme
+    pub theme_overrides: HashMap<String, settings::ThemeStyleContent>,
+    /// The current icon theme selection.
+    pub icon_theme: IconThemeSelection,
+    /// The density of the UI.
+    /// Note: This setting is still experimental. See [this tracking issue](
+    pub ui_density: UiDensity,
+    /// The amount of fading applied to unnecessary code.
+    pub unnecessary_code_fade: f32,
+}
+
+/// Returns the name of the default theme for the given [`Appearance`].
+pub fn default_theme(appearance: Appearance) -> &'static str {
+    match appearance {
+        Appearance::Light => settings::DEFAULT_LIGHT_THEME,
+        Appearance::Dark => settings::DEFAULT_DARK_THEME,
+    }
+}
+
+#[derive(Default)]
+struct BufferFontSize(Pixels);
+
+impl Global for BufferFontSize {}
+
+#[derive(Default)]
+pub(crate) struct UiFontSize(Pixels);
+
+impl Global for UiFontSize {}
+
+#[derive(Default)]
+pub struct GitCommitBufferFontSize(Pixels);
+
+impl Global for GitCommitBufferFontSize {}
+
+/// In-memory override for the markdown preview font size.
+#[derive(Default)]
+pub struct MarkdownPreviewFontSize(Pixels);
+
+impl Global for MarkdownPreviewFontSize {}
+
+/// Represents the selection of a theme, which can be either static or dynamic.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ThemeSelection {
+    /// A static theme selection, represented by a single theme name.
+    Static(ThemeName),
+    /// A dynamic theme selection, which can change based the [ThemeMode].
+    Dynamic {
+        /// The mode used to determine which theme to use.
+        #[serde(default)]
+        mode: ThemeAppearanceMode,
+        /// The theme to use for light mode.
+        light: ThemeName,
+        /// The theme to use for dark mode.
+        dark: ThemeName,
+    },
+}
+
+impl From<settings::ThemeSelection> for ThemeSelection {
+    fn from(selection: settings::ThemeSelection) -> Self {
+        match selection {
+            settings::ThemeSelection::Static(theme) => ThemeSelection::Static(theme),
+            settings::ThemeSelection::Dynamic { mode, light, dark } => {
+                ThemeSelection::Dynamic { mode, light, dark }
+            }
+        }
+    }
+}
+
+impl ThemeSelection {
+    /// Returns the theme name for the selected [ThemeMode].
+    pub fn name(&self, system_appearance: Appearance) -> ThemeName {
+        match self {
+            Self::Static(theme) => theme.clone(),
+            Self::Dynamic { mode, light, dark } => match mode {
+                ThemeAppearanceMode::Light => light.clone(),
+                ThemeAppearanceMode::Dark => dark.clone(),
+                ThemeAppearanceMode::System => match system_appearance {
+                    Appearance::Light => light.clone(),
+                    Appearance::Dark => dark.clone(),
+                },
+            },
+        }
+    }
+
+    /// Returns the [ThemeMode] for the [ThemeSelection].
+    pub fn mode(&self) -> Option<ThemeAppearanceMode> {
+        match self {
+            ThemeSelection::Static(_) => None,
+            ThemeSelection::Dynamic { mode, .. } => Some(*mode),
+        }
+    }
+}
+
+/// Represents the selection of an icon theme, which can be either static or dynamic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IconThemeSelection {
+    /// A static icon theme selection, represented by a single icon theme name.
+    Static(IconThemeName),
+    /// A dynamic icon theme selection, which can change based on the [`ThemeMode`].
+    Dynamic {
+        /// The mode used to determine which theme to use.
+        mode: ThemeAppearanceMode,
+        /// The icon theme to use for light mode.
+        light: IconThemeName,
+        /// The icon theme to use for dark mode.
+        dark: IconThemeName,
+    },
+}
+
+impl From<settings::IconThemeSelection> for IconThemeSelection {
+    fn from(selection: settings::IconThemeSelection) -> Self {
+        match selection {
+            settings::IconThemeSelection::Static(theme) => IconThemeSelection::Static(theme),
+            settings::IconThemeSelection::Dynamic { mode, light, dark } => {
+                IconThemeSelection::Dynamic { mode, light, dark }
+            }
+        }
+    }
+}
+
+impl IconThemeSelection {
+    /// Returns the icon theme name to pair with an active theme of the given [`Appearance`].
+    ///
+    /// Either Symbols variant resolves to the one matching `theme_appearance`.
+    pub fn name(&self, theme_appearance: Appearance) -> IconThemeName {
+        let name = match self {
+            Self::Static(theme) => theme.clone(),
+            Self::Dynamic { mode, light, dark } => match mode {
+                ThemeAppearanceMode::Light => light.clone(),
+                ThemeAppearanceMode::Dark => dark.clone(),
+                ThemeAppearanceMode::System => match theme_appearance {
+                    Appearance::Light => light.clone(),
+                    Appearance::Dark => dark.clone(),
+                },
+            },
+        };
+
+        let is_symbols = [SYMBOLS_ICON_THEME_NAME, SYMBOLS_ICON_THEME_LIGHT_NAME]
+            .contains(&name.0.as_ref());
+        if !is_symbols {
+            return name;
+        }
+        IconThemeName(
+            match theme_appearance {
+                Appearance::Light => SYMBOLS_ICON_THEME_LIGHT_NAME,
+                Appearance::Dark => SYMBOLS_ICON_THEME_NAME,
+            }
+            .into(),
+        )
+    }
+
+    /// Returns the [`ThemeMode`] for the [`IconThemeSelection`].
+    pub fn mode(&self) -> Option<ThemeAppearanceMode> {
+        match self {
+            IconThemeSelection::Static(_) => None,
+            IconThemeSelection::Dynamic { mode, .. } => Some(*mode),
+        }
+    }
+}
+
+/// Sets the theme for the given appearance to the theme with the specified name.
+///
+/// The caller should make sure that the [`Appearance`] matches the theme associated with the name.
+///
+/// If the current [`ThemeAppearanceMode`] is set to [`System`] and the user's system [`Appearance`]
+/// is different than the new theme's [`Appearance`], this function will update the
+/// [`ThemeAppearanceMode`] to the new theme's appearance in order to display the new theme.
+///
+/// [`System`]: ThemeAppearanceMode::System
+pub fn set_theme(
+    current: &mut SettingsContent,
+    theme_name: impl Into<Arc<str>>,
+    theme_appearance: Appearance,
+    system_appearance: Appearance,
+) {
+    let theme_name = ThemeName(theme_name.into());
+
+    let Some(selection) = current.theme.theme.as_mut() else {
+        current.theme.theme = Some(settings::ThemeSelection::Static(theme_name));
+        return;
+    };
+
+    let mut updated_mode = None;
+    match selection {
+        settings::ThemeSelection::Static(theme) => {
+            *theme = theme_name;
+        }
+        settings::ThemeSelection::Dynamic { mode, light, dark } => {
+            match theme_appearance {
+                Appearance::Light => *light = theme_name,
+                Appearance::Dark => *dark = theme_name,
+            }
+
+            let should_update_mode =
+                !(mode == &ThemeAppearanceMode::System && theme_appearance == system_appearance);
+
+            if should_update_mode {
+                *mode = appearance_to_mode(theme_appearance);
+                updated_mode = Some(*mode);
+            }
+        }
+    }
+
+    if let Some(mode) = updated_mode {
+        set_icon_theme_mode(current.theme.as_mut(), mode);
+    }
+}
+
+/// Sets the icon theme for the given appearance to the icon theme with the specified name.
+pub fn set_icon_theme(
+    current: &mut SettingsContent,
+    icon_theme_name: IconThemeName,
+    appearance: Appearance,
+) {
+    if let Some(selection) = current.theme.icon_theme.as_mut() {
+        let icon_theme_to_update = match selection {
+            settings::IconThemeSelection::Static(theme) => theme,
+            settings::IconThemeSelection::Dynamic { mode, light, dark } => match mode {
+                ThemeAppearanceMode::Light => light,
+                ThemeAppearanceMode::Dark => dark,
+                ThemeAppearanceMode::System => match appearance {
+                    Appearance::Light => light,
+                    Appearance::Dark => dark,
+                },
+            },
+        };
+
+        *icon_theme_to_update = icon_theme_name;
+    } else {
+        current.theme.icon_theme = Some(settings::IconThemeSelection::Static(icon_theme_name));
+    }
+}
+
+/// Sets the mode for the theme.
+pub fn set_mode(content: &mut SettingsContent, mode: ThemeAppearanceMode) {
+    let theme = content.theme.as_mut();
+
+    if let Some(selection) = theme.theme.as_mut() {
+        match selection {
+            settings::ThemeSelection::Static(_) => {
+                *selection = settings::ThemeSelection::Dynamic {
+                    mode: ThemeAppearanceMode::System,
+                    light: ThemeName(settings::DEFAULT_LIGHT_THEME.into()),
+                    dark: ThemeName(settings::DEFAULT_DARK_THEME.into()),
+                };
+            }
+            settings::ThemeSelection::Dynamic {
+                mode: mode_to_update,
+                ..
+            } => *mode_to_update = mode,
+        }
+    } else {
+        theme.theme = Some(settings::ThemeSelection::Dynamic {
+            mode,
+            light: ThemeName(settings::DEFAULT_LIGHT_THEME.into()),
+            dark: ThemeName(settings::DEFAULT_DARK_THEME.into()),
+        });
+    }
+
+    set_icon_theme_mode(theme, mode);
+}
+
+fn set_icon_theme_mode(theme: &mut settings::ThemeSettingsContent, mode: ThemeAppearanceMode) {
+    if let Some(selection) = theme.icon_theme.as_mut() {
+        match selection {
+            settings::IconThemeSelection::Static(icon_theme) => {
+                *selection = settings::IconThemeSelection::Dynamic {
+                    mode,
+                    light: icon_theme.clone(),
+                    dark: icon_theme.clone(),
+                };
+            }
+            settings::IconThemeSelection::Dynamic {
+                mode: mode_to_update,
+                ..
+            } => *mode_to_update = mode,
+        }
+    } else {
+        theme.icon_theme = Some(settings::IconThemeSelection::Dynamic {
+            mode,
+            light: IconThemeName(SYMBOLS_ICON_THEME_LIGHT_NAME.into()),
+            dark: IconThemeName(SYMBOLS_ICON_THEME_NAME.into()),
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn icon_mode(content: &SettingsContent) -> Option<ThemeAppearanceMode> {
+        match content.theme.icon_theme.as_ref()? {
+            settings::IconThemeSelection::Static(_) => None,
+            settings::IconThemeSelection::Dynamic { mode, .. } => Some(*mode),
+        }
+    }
+
+    fn theme_mode(content: &SettingsContent) -> Option<ThemeAppearanceMode> {
+        match content.theme.theme.as_ref()? {
+            settings::ThemeSelection::Static(_) => None,
+            settings::ThemeSelection::Dynamic { mode, .. } => Some(*mode),
+        }
+    }
+
+    #[test]
+    fn set_mode_seeds_symbols_icon_themes_with_the_same_mode() {
+        let mut content = SettingsContent::default();
+        set_mode(&mut content, ThemeAppearanceMode::Light);
+
+        assert_eq!(
+            content.theme.icon_theme,
+            Some(settings::IconThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::Light,
+                light: IconThemeName(SYMBOLS_ICON_THEME_LIGHT_NAME.into()),
+                dark: IconThemeName(SYMBOLS_ICON_THEME_NAME.into()),
+            })
+        );
+    }
+
+    #[test]
+    fn set_theme_keeps_icon_theme_mode_in_step_with_theme_mode() {
+        let mut content = SettingsContent::default();
+        set_mode(&mut content, ThemeAppearanceMode::System);
+        set_theme(
+            &mut content,
+            "One Light",
+            Appearance::Light,
+            Appearance::Dark,
+        );
+
+        assert_eq!(theme_mode(&content), Some(ThemeAppearanceMode::Light));
+        assert_eq!(icon_mode(&content), Some(ThemeAppearanceMode::Light));
+    }
+
+    #[test]
+    fn symbols_icon_theme_follows_theme_appearance() {
+        let symbols = IconThemeName(SYMBOLS_ICON_THEME_NAME.into());
+        let symbols_light = IconThemeName(SYMBOLS_ICON_THEME_LIGHT_NAME.into());
+        let selections = [
+            IconThemeSelection::Static(symbols.clone()),
+            IconThemeSelection::Static(symbols_light.clone()),
+            IconThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::Dark,
+                light: symbols_light.clone(),
+                dark: symbols.clone(),
+            },
+            IconThemeSelection::Dynamic {
+                mode: ThemeAppearanceMode::System,
+                light: symbols.clone(),
+                dark: symbols.clone(),
+            },
+        ];
+
+        for selection in selections {
+            assert_eq!(selection.name(Appearance::Light), symbols_light);
+            assert_eq!(selection.name(Appearance::Dark), symbols);
+        }
+    }
+
+    #[test]
+    fn other_static_icon_themes_are_left_alone() {
+        let custom = IconThemeName("Custom Icons".into());
+        let selection = IconThemeSelection::Static(custom.clone());
+
+        assert_eq!(selection.name(Appearance::Light), custom);
+        assert_eq!(selection.name(Appearance::Dark), custom);
+    }
+
+    fn theme_with_colors(colors: ::settings::ThemeColorsContent) -> Theme {
+        crate::refine_theme(&crate::ThemeContent {
+            name: "Test".into(),
+            appearance: ::theme::AppearanceContent::Dark,
+            style: ::settings::ThemeStyleContent {
+                colors,
+                ..Default::default()
+            },
+        })
+    }
+
+    fn style_with_colors(colors: ::settings::ThemeColorsContent) -> ::settings::ThemeStyleContent {
+        ::settings::ThemeStyleContent {
+            colors,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn code_lens_foreground_from_theme_survives_text_muted_override() {
+        let magenta = ::theme::try_parse_color("#ff00ff").unwrap();
+        let green = ::theme::try_parse_color("#00ff00").unwrap();
+        let mut test_theme = theme_with_colors(::settings::ThemeColorsContent {
+            editor_code_lens_foreground: Some("#ff00ff".into()),
+            ..Default::default()
+        });
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings::ThemeColorsContent {
+                text_muted: Some("#00ff00".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(
+            test_theme.styles.colors.editor_code_lens_foreground,
+            Some(magenta)
+        );
+        assert_eq!(test_theme.styles.colors.text_muted, green);
+    }
+
+    #[test]
+    fn code_lens_foreground_from_earlier_override_survives_later_muted_override() {
+        let magenta = ::theme::try_parse_color("#ff00ff").unwrap();
+        let green = ::theme::try_parse_color("#00ff00").unwrap();
+        let mut test_theme = theme_with_colors(Default::default());
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings::ThemeColorsContent {
+                editor_code_lens_foreground: Some("#ff00ff".into()),
+                ..Default::default()
+            }),
+        );
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings::ThemeColorsContent {
+                text_muted: Some("#00ff00".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(
+            test_theme.styles.colors.editor_code_lens_foreground,
+            Some(magenta)
+        );
+        assert_eq!(test_theme.styles.colors.text_muted, green);
+    }
+
+    #[test]
+    fn code_lens_foreground_follows_effective_text_muted_without_explicit_color() {
+        let green = ::theme::try_parse_color("#00ff00").unwrap();
+        let mut test_theme = theme_with_colors(Default::default());
+
+        ThemeSettings::modify_theme(
+            &mut test_theme,
+            &style_with_colors(::settings::ThemeColorsContent {
+                text_muted: Some("#00ff00".into()),
+                ..Default::default()
+            }),
+        );
+
+        assert_eq!(test_theme.styles.colors.editor_code_lens_foreground, None);
+        assert_eq!(
+            test_theme
+                .styles
+                .colors
+                .color(::theme::ThemeColorField::EditorCodeLensForeground),
+            green
+        );
+    }
+}
+
+pub use theme::BufferLineHeight;
+
+pub fn buffer_line_height_from_settings(value: settings::BufferLineHeight) -> BufferLineHeight {
+    match value {
+        settings::BufferLineHeight::Comfortable => BufferLineHeight::Comfortable,
+        settings::BufferLineHeight::Standard => BufferLineHeight::Standard,
+        settings::BufferLineHeight::Custom(line_height) => BufferLineHeight::Custom(line_height),
+    }
+}
+
+impl ThemeSettings {
+    /// Returns the buffer font size.
+    pub fn buffer_font_size(&self, cx: &App) -> Pixels {
+        let font_size = cx
+            .try_global::<BufferFontSize>()
+            .map(|size| size.0)
+            .unwrap_or(self.buffer_font_size);
+        clamp_font_size(font_size)
+    }
+
+    /// Returns the UI font size.
+    pub fn ui_font_size(&self, cx: &App) -> Pixels {
+        let font_size = cx
+            .try_global::<UiFontSize>()
+            .map(|size| size.0)
+            .unwrap_or(self.ui_font_size);
+        clamp_font_size(font_size)
+    }
+
+    pub fn git_commit_buffer_font_size(&self, cx: &App) -> Pixels {
+        cx.try_global::<GitCommitBufferFontSize>()
+            .map(|size| size.0)
+            .or(self.git_commit_buffer_font_size)
+            .map(clamp_font_size)
+            .unwrap_or_else(|| self.buffer_font_size(cx))
+    }
+
+    /// Returns the font family to use in the markdown preview,
+    /// falling back to the UI font family when unset.
+    pub fn markdown_preview_font_family(&self) -> &SharedString {
+        self.markdown_preview_font_family
+            .as_ref()
+            .unwrap_or(&self.ui_font.family)
+    }
+
+    /// Returns the font family to use for code in the markdown preview,
+    /// falling back to the buffer font family when unset.
+    pub fn markdown_preview_code_font_family(&self) -> &SharedString {
+        self.markdown_preview_code_font_family
+            .as_ref()
+            .unwrap_or(&self.buffer_font.family)
+    }
+
+    /// Returns the markdown preview font size.
+    ///
+    /// Note: the fallback deliberately uses `self.ui_font_size` instead of `ui_font_size(cx)`,
+    /// so that temporary UI zoom does not also resize the markdown preview.
+    pub fn markdown_preview_font_size(&self, cx: &App) -> Pixels {
+        cx.try_global::<MarkdownPreviewFontSize>()
+            .map(|size| size.0)
+            .or(self.markdown_preview_font_size)
+            .map(clamp_font_size)
+            .unwrap_or_else(|| clamp_font_size(self.ui_font_size))
+    }
+
+    /// Returns the buffer font size, read from the settings.
+    ///
+    /// The real buffer font size is stored in-memory, to support temporary font size changes.
+    /// Use [`Self::buffer_font_size`] to get the real font size.
+    pub fn buffer_font_size_settings(&self) -> Pixels {
+        self.buffer_font_size
+    }
+
+    /// Returns the UI font size, read from the settings.
+    ///
+    /// The real UI font size is stored in-memory, to support temporary font size changes.
+    /// Use [`Self::ui_font_size`] to get the real font size.
+    pub fn ui_font_size_settings(&self) -> Pixels {
+        self.ui_font_size
+    }
+
+    pub fn git_commit_buffer_font_size_settings(&self) -> Option<Pixels> {
+        self.git_commit_buffer_font_size
+    }
+
+    /// Returns the markdown preview font size, read from the settings.
+    ///
+    /// The real markdown preview font size is stored in-memory, to support temporary
+    /// font size changes. Use [`Self::markdown_preview_font_size`] to get the real font size.
+    pub fn markdown_preview_font_size_settings(&self) -> Option<Pixels> {
+        self.markdown_preview_font_size
+    }
+
+    /// Returns the buffer's line height.
+    pub fn line_height(&self) -> f32 {
+        f32::max(self.buffer_line_height.value(), MIN_LINE_HEIGHT)
+    }
+
+    /// Applies the theme overrides, if there are any, to the current theme.
+    pub fn apply_theme_overrides(&self, mut arc_theme: Arc<Theme>) -> Arc<Theme> {
+        if let Some(experimental_theme_overrides) = &self.experimental_theme_overrides {
+            let mut theme = (*arc_theme).clone();
+            ThemeSettings::modify_theme(&mut theme, experimental_theme_overrides);
+            arc_theme = Arc::new(theme);
+        }
+
+        if let Some(theme_overrides) = self.theme_overrides.get(arc_theme.name.as_ref()) {
+            let mut theme = (*arc_theme).clone();
+            ThemeSettings::modify_theme(&mut theme, theme_overrides);
+            arc_theme = Arc::new(theme);
+        }
+
+        arc_theme
+    }
+
+    fn modify_theme(base_theme: &mut Theme, theme_overrides: &settings::ThemeStyleContent) {
+        if let Some(window_background_appearance) = theme_overrides.window_background_appearance {
+            base_theme.styles.window_background_appearance =
+                window_background_appearance.into_gpui();
+        }
+        let status_color_refinement = status_colors_refinement(&theme_overrides.status);
+
+        let theme_color_refinement = theme_colors_refinement(
+            &theme_overrides.colors,
+            &status_color_refinement,
+            base_theme.appearance.is_light(),
+        );
+        base_theme.styles.colors.refine(&theme_color_refinement);
+        base_theme.styles.status.refine(&status_color_refinement);
+        merge_player_colors(&mut base_theme.styles.player, &theme_overrides.players);
+        merge_accent_colors(&mut base_theme.styles.accents, &theme_overrides.accents);
+        base_theme.styles.syntax = SyntaxTheme::merge(
+            base_theme.styles.syntax.clone(),
+            syntax_overrides(theme_overrides),
+        );
+    }
+}
+
+/// Observe changes to the adjusted buffer font size.
+pub fn observe_buffer_font_size_adjustment<V: 'static>(
+    cx: &mut Context<V>,
+    f: impl 'static + Fn(&mut V, &mut Context<V>),
+) -> Subscription {
+    cx.observe_global::<BufferFontSize>(f)
+}
+
+/// Gets the font size, adjusted by the difference between the current buffer font size and the one set in the settings.
+pub fn adjusted_font_size(size: Pixels, cx: &App) -> Pixels {
+    let adjusted_font_size =
+        if let Some(BufferFontSize(adjusted_size)) = cx.try_global::<BufferFontSize>() {
+            let buffer_font_size = ThemeSettings::get_global(cx).buffer_font_size;
+            let delta = *adjusted_size - buffer_font_size;
+            size + delta
+        } else {
+            size
+        };
+    clamp_font_size(adjusted_font_size)
+}
+
+/// Adjusts the buffer font size, without persisting the result in the settings.
+/// This will be effective until the app is restarted.
+pub fn adjust_buffer_font_size(cx: &mut App, f: impl FnOnce(Pixels) -> Pixels) {
+    let buffer_font_size = ThemeSettings::get_global(cx).buffer_font_size;
+    let adjusted_size = cx
+        .try_global::<BufferFontSize>()
+        .map_or(buffer_font_size, |adjusted_size| adjusted_size.0);
+    cx.set_global(BufferFontSize(clamp_font_size(f(adjusted_size))));
+    cx.refresh_windows();
+}
+
+/// Resets the buffer font size to the default value.
+pub fn reset_buffer_font_size(cx: &mut App) {
+    if cx.has_global::<BufferFontSize>() {
+        cx.remove_global::<BufferFontSize>();
+        cx.refresh_windows();
+    }
+}
+
+#[allow(missing_docs)]
+pub fn setup_ui_font(window: &mut Window, cx: &mut App) -> gpui::Font {
+    let (ui_font, ui_font_size) = {
+        let theme_settings = ThemeSettings::get_global(cx);
+        let font = theme_settings.ui_font.clone();
+        (font, theme_settings.ui_font_size(cx))
+    };
+
+    window.set_rem_size(ui_font_size);
+    ui_font
+}
+
+/// Sets the adjusted UI font size.
+pub fn adjust_ui_font_size(cx: &mut App, f: impl FnOnce(Pixels) -> Pixels) {
+    let ui_font_size = ThemeSettings::get_global(cx).ui_font_size(cx);
+    let adjusted_size = cx
+        .try_global::<UiFontSize>()
+        .map_or(ui_font_size, |adjusted_size| adjusted_size.0);
+    cx.set_global(UiFontSize(clamp_font_size(f(adjusted_size))));
+    cx.refresh_windows();
+}
+
+/// Resets the UI font size to the default value.
+pub fn reset_ui_font_size(cx: &mut App) {
+    if cx.has_global::<UiFontSize>() {
+        cx.remove_global::<UiFontSize>();
+        cx.refresh_windows();
+    }
+}
+
+pub fn adjust_git_commit_buffer_font_size(cx: &mut App, f: impl FnOnce(Pixels) -> Pixels) {
+    let git_commit_buffer_font_size = ThemeSettings::get_global(cx).git_commit_buffer_font_size(cx);
+    let adjusted_size = cx
+        .try_global::<GitCommitBufferFontSize>()
+        .map_or(git_commit_buffer_font_size, |adjusted_size| adjusted_size.0);
+    cx.set_global(GitCommitBufferFontSize(clamp_font_size(f(adjusted_size))));
+    cx.refresh_windows();
+}
+
+pub fn reset_git_commit_buffer_font_size(cx: &mut App) {
+    if cx.has_global::<GitCommitBufferFontSize>() {
+        cx.remove_global::<GitCommitBufferFontSize>();
+        cx.refresh_windows();
+    }
+}
+
+/// Sets the adjusted font size of the markdown preview.
+pub fn adjust_markdown_preview_font_size(cx: &mut App, f: impl FnOnce(Pixels) -> Pixels) {
+    let markdown_preview_font_size = ThemeSettings::get_global(cx).markdown_preview_font_size(cx);
+    let adjusted_size = cx
+        .try_global::<MarkdownPreviewFontSize>()
+        .map_or(markdown_preview_font_size, |adjusted_size| adjusted_size.0);
+    cx.set_global(MarkdownPreviewFontSize(clamp_font_size(f(adjusted_size))));
+    cx.refresh_windows();
+}
+
+/// Resets the markdown preview font size to the default value.
+pub fn reset_markdown_preview_font_size(cx: &mut App) {
+    if cx.has_global::<MarkdownPreviewFontSize>() {
+        cx.remove_global::<MarkdownPreviewFontSize>();
+        cx.refresh_windows();
+    }
+}
+
+/// Ensures font size is within the valid range.
+pub fn clamp_font_size(size: Pixels) -> Pixels {
+    size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+}
+
+fn font_fallbacks_from_settings(
+    fallbacks: Option<Vec<settings::FontFamilyName>>,
+    language: i18n::Language,
+) -> Option<FontFallbacks> {
+    let mut fonts = fallbacks
+        .unwrap_or_default()
+        .into_iter()
+        .map(|font_family| font_family.0.to_string())
+        .collect::<Vec<_>>();
+    if language == i18n::Language::SimplifiedChinese
+        && !fonts.iter().any(|font| font == SIMPLIFIED_CHINESE_FONT)
+    {
+        fonts.push(SIMPLIFIED_CHINESE_FONT.to_string());
+    }
+    (!fonts.is_empty()).then(|| FontFallbacks::from_fonts(fonts))
+}
+
+// Without an explicit fallback, macOS can draw Chinese text with a Japanese font.
+#[cfg(target_os = "macos")]
+const SIMPLIFIED_CHINESE_FONT: &str = "PingFang SC";
+#[cfg(target_os = "windows")]
+const SIMPLIFIED_CHINESE_FONT: &str = "Microsoft YaHei UI";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const SIMPLIFIED_CHINESE_FONT: &str = "Noto Sans CJK SC";
+
+fn ui_language_from_settings(language: Option<settings::UiLanguage>) -> i18n::Language {
+    match language.unwrap_or_default() {
+        settings::UiLanguage::System => i18n::Language::system(),
+        settings::UiLanguage::English => i18n::Language::English,
+        settings::UiLanguage::SimplifiedChinese => i18n::Language::SimplifiedChinese,
+    }
+}
+
+impl settings::Settings for ThemeSettings {
+    fn from_settings(settings_content: &settings::SettingsContent) -> Self {
+        let content = &settings_content.theme;
+        let markdown_preview = settings_content.markdown_preview.as_ref();
+        let theme_selection: ThemeSelection = content.theme.clone().unwrap().into();
+        let icon_theme_selection: IconThemeSelection = content.icon_theme.clone().unwrap().into();
+        let ui_language = ui_language_from_settings(content.ui_language);
+        Self {
+            ui_font_size: clamp_font_size(content.ui_font_size.unwrap().into_gpui()),
+            ui_language,
+            ui_language_follows_system: content.ui_language.unwrap_or_default()
+                == settings::UiLanguage::System,
+            ui_font: Font {
+                family: content.ui_font_family.as_ref().unwrap().0.clone().into(),
+                features: content.ui_font_features.clone().unwrap().into_gpui(),
+                fallbacks: font_fallbacks_from_settings(
+                    content.ui_font_fallbacks.clone(),
+                    ui_language,
+                ),
+                weight: content.ui_font_weight.unwrap().into_gpui(),
+                style: Default::default(),
+            },
+            buffer_font: Font {
+                family: content
+                    .buffer_font_family
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .clone()
+                    .into(),
+                features: content.buffer_font_features.clone().unwrap().into_gpui(),
+                fallbacks: font_fallbacks_from_settings(
+                    content.buffer_font_fallbacks.clone(),
+                    ui_language,
+                ),
+                weight: content.buffer_font_weight.unwrap().into_gpui(),
+                style: FontStyle::default(),
+            },
+            buffer_font_size: clamp_font_size(content.buffer_font_size.unwrap().into_gpui()),
+            buffer_line_height: buffer_line_height_from_settings(
+                content.buffer_line_height.unwrap(),
+            ),
+            git_commit_buffer_font_size: content.git_commit_buffer_font_size.map(|s| s.into_gpui()),
+            markdown_preview_font_family: markdown_preview
+                .and_then(|preview| preview.font_family.as_ref())
+                .or(content.markdown_preview_font_family.as_ref())
+                .map(|f| f.0.clone().into()),
+            markdown_preview_code_font_family: markdown_preview
+                .and_then(|preview| preview.code_font_family.as_ref())
+                .or(content.markdown_preview_code_font_family.as_ref())
+                .map(|f| f.0.clone().into()),
+            markdown_preview_font_size: markdown_preview
+                .and_then(|preview| preview.font_size)
+                .or(content.markdown_preview_font_size)
+                .map(|size| size.into_gpui()),
+            markdown_preview_theme: markdown_preview
+                .and_then(|preview| preview.theme.clone())
+                .or_else(|| content.markdown_preview_theme.clone())
+                .map(ThemeSelection::from),
+            theme: theme_selection,
+            experimental_theme_overrides: content.experimental_theme_overrides.clone(),
+            theme_overrides: content.theme_overrides.clone(),
+            icon_theme: icon_theme_selection,
+            ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
+            unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
+        }
+    }
+}

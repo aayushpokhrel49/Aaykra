@@ -1,0 +1,292 @@
+# Changelog
+
+All notable user-facing changes to Aaykra are listed here, newest first.
+
+## Unreleased
+
+## 1.5.0 - 2026-11-22
+
+- Add support Antigravity.
+- Thinner, rounded scrollbar in the editor.
+- Much lower CPU use while agents are working, and smoother long chats.
+- Agents left idle for 15 minutes are terminated till the next message is sent.
+- Faster Git refresh and commit history in large repositories.
+- Faster search panel on files with very long lines.
+- Fix Mermaid rendering issues.
+
+## 1.4.0 - 2026-11-21
+
+- Support git ops like cherry-pick, merge, and squash.
+- Add tree graph to Git panel's History.
+- Support Mermaid diagrams in markdown preview.
+- Faster startup when reopening long agent chats.
+- Fix long file names stretching PDF and image tabs.
+- Fix terminal not picking up new env vars without Aaykra restart on Windows.
+- Show "Open with Aaykra" in context menu on Windows 11 when the classic Windows 10 menu is enabled.
+- Respect the system's dark or light mode in the Windows installer.
+
+## 1.3.0 - 2026-11-14
+
+- Fix the Git panel's History tab opening at the oldest commit.
+- Add touchscreen support on Linux and Windows.
+- Fix the search panel's action buttons doing nothing when out of focus.
+- Show a Repositories list in the Git panel when a project has more than one repository.
+- Reorder project tabs in the title bar by dragging them.
+- Give files associated with Aaykra on Windows distinct icons.
+
+## 1.2.2 - 2026-11-11
+
+- Fix the Git panel going stale after running git commands outside Aaykra.
+- Fix new files ignoring the `line_ending` setting.
+- Fix a console window opening on Windows when an agent starts.
+- Fix OpenCode questions not showing a picker.
+- Fix Aaykra crashing on startup on ARM Linux.
+- List models in the model picker in the same order as the underlying agent.
+
+## 1.2.1 - 2026-11-09
+
+- Fix links and text selection in tables rendered in agent chat.
+- Allow multiple tabs inside the agent chat side panel.
+- Reduce quoted text bar's width.
+- Close images in agent chat on background click.
+- Make agent thinking indicator animation look more like Aaykra.
+
+## 1.2.0 - 2026-11-08
+
+- Add a side panel for agent chats.
+- Fix voice dictation UI in agent chat.
+- Fix window resize not persisting on Windows.
+- Inter at 350 weight is now the new interface font.
+- Bring in improvements and bug fixes from Zed v1.22.
+- Fix background command indicator wrapping onto the next line.
+- Fix thought process getting nested under two headers when there's nothing else in the group.
+
+## 1.1.19 - 2026-11-07
+
+- Fix jank in git panel's history.
+- Improve agent chat input UI.
+- Improve agent questions UX.
+- Smaller download and install size on macOS.
+
+| Binary | 1.1.18 (MB) | 1.1.19 (MB) | Change |
+|---|---|---|---|
+| Aaykra-aarch64.dmg | 86.8 | 72.2 | −17% |
+| Aaykra-x86_64.dmg | 95.4 | 75.8 | −21% |
+
+## 1.1.18 - 2026-11-06
+
+- Smaller download and install size on Linux and Windows.
+
+| Binary | 1.1.17 (MB) | 1.1.18 (MB) | Change |
+|---|---|---|---|
+| aaykra-linux-aarch64.tar.gz | 86.3 | 54.7 | −37% |
+| aaykra-linux-x86_64.tar.gz | 89.4 | 57.8 | −35% |
+| Aaykra-x86_64.exe | 53.6 | 39.6 | −26% |
+
+## 1.1.17 - 2026-11-06
+
+- Clearer message in Agent Chat when an agent isn't installed.
+- Fixed the Windows installer putting Aaykra into Zed's folder, and Zed into Aaykra's, when both are installed.
+- Fixed the Explorer "Open with Aaykra" menu showing Zed's title when Zed is installed.
+- New `project_panel.open_mode` setting to open files in the Project panel with a double click. Possible values: `single_click` (default) and `double_click`.
+- Write commit messages with agents from the Git panel.
+- Commits in the Git panel's History now expand to list their changed files. Clicking a file follows `git_panel.entry_primary_click_action`.
+- New `git.graph_date_format` setting to show Git Graph dates as `2026-11-04 16:14:00`. Possible values: `default` and `iso`.
+
+## 1.1.16 - 2026-11-02
+
+- Fix debug session picker overlapping the panel's tabs.
+- Switching projects from the top-left menu keeps the previous projects open in the background.
+- Easy switching between multiple open projects in a window.
+- Open projects in the project menu show a dot while an agent is working or needs you.
+- Clicking an agent notification switches to that chat's project.
+
+## 1.1.15 - 2026-10-31
+
+- Fixed Aaykra started from Raycast still getting Raycast's env in its shell.
+
+## 1.1.14 - 2026-10-31
+
+- Fixed the agent chat box jumping between one and two lines.
+- Lines starting with `>` in agent chat messages now render as quotes on send.
+- Forked chats are now numbered for distinction.
+- Fixed projects opened from Raycast inheriting the launcher's env in their terminals.
+- Fixed GPT-6.1-Sol missing from the Codex model list.
+
+## 1.1.13 - 2026-10-28
+
+- Subagents running in the background can now be expanded and observed via the background task indicator.
+- On WSL2, Aaykra can now use the GPU when started with `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1`.
+- In agent chat, SVG, BMP and TIFF files are now added as file references instead of being turned into PNG attachments.
+- Added syntax highlighting for XML and SVG files.
+
+## 1.1.12 - 2026-10-26
+
+- Add support for Simplified Chinese (Preview).
+- Cancelled messages in older Codex chats no longer offer Edit.
+- Fixed agent chats with generated images jumping while you scroll.
+
+## 1.1.11 - 2026-10-26
+
+- You can now save important messages in agent chats for later.
+- Aaykra Dark has a new solid look with softer colors. Previous Aaykra Dark is now `Aaykra Dark Translucent`.
+- Typing `@` in an agent chat now shows more relevant file suggestions.
+- Images in agent chats can now be downloaded.
+- Fixed Perso-Arabic script and other text with raised or lowered letters looking scrambled on macOS.
+- Cancelled messages can be edited and sent again, as long as the agent didn't make any changes.
+- Line breaks in agent replies now show as written instead of running lines together.
+
+## 1.1.10 - 2026-10-24
+
+- Agent CLIs are now kept up to date by Aaykra.
+- Agent chats are now restored on restart.
+- Typing `@` in an agent chat now lists project's files right away.
+- Typing `$` in a Claude Code chat now lists skills instead of only listing them on `/`.
+- Files, commands and skills picked from the chat box menus show up as badges instead of plain text.
+- Removed running shell commands by starting an agent chat message with `!`.
+- Removed the checkout and branch picker from under the agent chat input.
+
+## 1.1.9 - 2026-10-24
+
+- Start a message with `!` in an agent chat to run it as a shell command.
+- Images can now be dragged onto Aaykra's dock icon and dropped into one of its windows on macOS.
+- Changing the permission mode now applies to the turn immediately instead of on the next message.
+- Fixed long permission prompts pushing the Allow and Deny buttons off screen.
+- Subagents and files referred in agent chats now open in a side pane instead of a new tab.
+- The cursor in the agent chat box is thinner.
+
+## 1.1.8 - 2026-10-20
+
+- Fixed "Dock Right" not moving the agent panel.
+
+## 1.1.7 - 2026-10-15
+
+- Fixed Codex bundled with the ChatGPT desktop app not found.
+- Chats can now be renamed from their tabs.
+- Tables in agent replies can be copied as markdown.
+- Fixed Claude Code chats that seemed stuck.
+- OpenCode chats now pick up the name OpenCode gives them.
+
+## 1.1.6 - 2026-10-11
+
+- Added "Pull From" to the Git sync menu, so you can pull any branch from any remote.
+- Fixed the Git sync button spinning forever after closing the remote picker.
+- Update the source address for auto-updates.
+
+## 1.1.5 - 2026-10-09
+
+- Fixed Codex computer use being blocked.
+- Claude Code chats can now use your Chrome browser through the Claude in Chrome extension.
+- Opening an empty folder in the file tree now shows an "Empty" line under it.
+- Claude Code skills in the chat's / menu now have their own icon, so they're easy to tell apart from commands.
+- Added an Enable Agent Chat setting. Turn it off to hide the agent panel and everything agent-releated.
+- Added more configuration options for agent chats to Settings.
+- Aaykra now asks before quitting or restarting while an agent is working.
+- Added "Continue Saved Chat" to the new chat menu, which picks up a chat you started in a CLI.
+- Added settings to hide Claude Code, Codex or OpenCode from the new chat menu.
+- Desktop notifications for agent chats are now off by default. On macOS, turning them on opens system preferences to allow Aaykra's notifications.
+- Removed Claude Code's settings and info commands like /model, /usage and /context from the chat's / menu.
+
+
+## 1.1.4 - 2026-10-08
+
+- Made the time on agent chats in the sidebar easier to read.
+- Fixed error and warning popups in the editor being see-through and hard to read in Aaykra Dark.
+- Cleaned up the context menu options in the agent chat sidebar.
+- Forked chats now continue from a real copy of the agent's own session.
+- User messages in agent chats can now be selected and copied in part.
+- Fixed open files sometimes not coming back when reopening a project.
+
+## 1.1.3 - 2026-10-06
+
+- Support for Intel Macs.
+- Fixed subagent tabs not showing the working indicator while a background subagent was still running.
+- Hovering the running command or agent indicator under the chat box now shows what's running in a tooltip.
+- The title bar and status bar in Aaykra Dark now have the same tint as the panels.
+- Fixed the working indicator in agent chats not coming back when the agent picks up again after a background process finishes.
+- Agent Chat now supports OpenCode.
+- The line number gutter is more compact.
+- The activity bar can sit on the right side of the window. Set it with `activity_bar.position` or in Settings.
+- A little more space between the activity bar icons.
+- Activity bar icons now follow the UI font size by default.
+- Fixed the side panel jumping wider when you start resizing it.
+- Users can now choose permission modes from the model picker.
+- Improve Aaykra Light's interface colors.
+
+## 1.1.2 - 2026-10-05
+
+- Fixed images dropped onto an agent chat opening in a preview instead of being attached.
+- When an agent is waiting on a background command or subagent, the bar under the chat box shows what's running and for how long.
+- Search inside an open agent chat with the Find bar (Cmd-F, or Ctrl-F on Windows and Linux).
+- Fixed macOS asking Aaykra for access to Desktop, Documents and Photos when agent chat looked up the available models.
+- Fixed the tab and the split and zoom buttons flickering after clicking into a chat message and scrolling away from it.
+- Fixed empty thought blocks in agent chats.
+- Thoughts in agent chats stay collapsed until you open them.
+- Claude models now use their largest context window by default, and Aaykra picks up the available sizes from Claude Code.
+- Agent notifications now use the system's native notifications.
+- In the model picker, effort is set with a slider and context window show every choice as a button.
+- Fixed the dark bar that showed at the top of the file tree when scrolling in Aaykra themes.
+- The sidebar, activity bar and tab bar in Aaykra Light now have solid colors.
+- Fixed the context window and plan usage popups in agent chats staying open when clicking elsewhere.
+- Removed the options menu from the top of the agent chat sidebar.
+- Agent chats in the sidebar no longer repeat the project name on every row, so the list is shorter and easier to scan.
+- The agent chat sidebar now uses the same background as the other panels in every theme.
+
+## 1.1.1 - 2026-10-05
+
+- `/compact` and other slash commands now work mid-conversation in Claude chats.
+- The chat shows "Compacting conversation…" while the agent compacts and the context ring updates right after.
+- Long agent chats scroll smoothly and typing in the chat box feels instant, since only the messages on screen are drawn.
+- Fixed a black bar at the top of the file tree when scrolling with the Aaykra themes.
+- Fixed text in the chat box being hard to read after switching between Aaykra Dark and Aaykra Light.
+
+## 1.1.0 - 2026-10-04
+
+- The activity bar's icon size is now configurable in settings and via the `activity_bar.icon_size` property.
+- New Aaykra Light and Aaykra Dark themes.
+- Symbols is the new default icon theme.
+- Geist is the new interface font, and JetBrains Mono is the new code font.
+- Redesigned tabs.
+- New Agent Chat panel in the activity bar. Chat with Claude Code or Codex using the CLIs you already have installed and signed in; no API keys needed.
+- Agent chats support slash commands, `@` file mentions and `$` skills, with a menu that completes them as you type.
+- Attach images to a message by pasting, dropping or using the paperclip button.
+- The chat sidebar has pins, custom sections, an archive, search and grouping by project. Chats can be forked, and side chats open next to the main one.
+- Aaykra can play a sound and show a notification when the agent finishes, needs your input or hits an error.
+- Voice dictation in the chat box, using a local speech model that downloads on first use.
+- New Agent Chat page in settings.
+- Idle windows on macOS stop redrawing until something changes, which saves power.
+- Fixed some list scrolling glitches and images that were sized wrongly in some layouts.
+
+## 1.0.10 - 2026-09-26
+
+- Project search uses much less memory. Files in the results are only parsed for syntax highlighting once they're shown on screen.
+- Breadcrumbs and sticky headers fill in as soon as a newly opened file finishes parsing, instead of waiting for the cursor to move.
+- Selected files in lists like the project panel stand out more in the Catppuccin themes.
+- Fixed a crash when uninstalling an extension whose theme has the same name as a built-in theme.
+- Opening a result from the search panel highlights the matches in that file the same way in-file search does.
+- Fixed cursor and scroll positions sometimes not being saved for files that were just opened.
+
+## 1.0.9 - 2026-09-20
+
+- Files copied in the project panel can now be pasted into another Aaykra window or into other apps.
+- Closing the last tab keeps the window open by default.
+- The project panel context menu has a Get Info item (Properties on Windows and Linux) that shows a file or folder's path, size, created and modified dates, and permissions.
+- Removed the bundled Ayu and Gruvbox themes.
+
+## 1.0.8 - 2026-09-12
+
+- Material Icon Theme is now the default icon theme, with light and dark variants that follow the theme mode.
+- Synced with Zed 1.19.2: multi-select in the Git panel, automatic language detection for untitled buffers, project search on type, recency-sorted command palette, the `reveal_if_open` setting, and many fixes.
+- Removed "Delete Permanently" from the project panel context menu. Delete always moves to the Trash.
+- Right-clicking the empty space below the file tree now opens the context menu.
+- Tabs for files that no longer exist show "File not found. It was deleted or moved." without offering to recreate the file.
+- Release builds compile every crate as a single codegen unit again for better runtime performance.
+
+## 1.0.7 - 2026-09-11
+
+- Files that were deleted while Aaykra was closed reopen as strikethrough tabs with a "file not found" message instead of a blank editor.
+- Tabs show the file's icon before its name.
+- The project panel's Delete action moves files to the Trash, with a separate Delete Permanently option.
+- Activity bar icons match VS Code's, with more vertical spacing, and all left-dock panels share one width.
+- Search moved into its own panel, and activity bar items can be reordered.
+- The file tree scrolls a little past its last entry.

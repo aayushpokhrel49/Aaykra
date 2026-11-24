@@ -1,0 +1,17 @@
+// Aaykra settings
+//
+// For information on how to configure Aaykra, see the Aaykra
+// documentation: https://zed.dev/docs/configuring-zed
+//
+// To see all of Aaykra's default settings without changing your
+// custom settings, run `aaykra: open default settings` from the
+// command palette (cmd-shift-p / ctrl-shift-p)
+{
+  "ui_font_size": 16,
+  "buffer_font_size": 15,
+  "theme": {
+    "mode": "system",
+    "light": "Aaykra Light",
+    "dark": "Aaykra Dark",
+  },
+}

@@ -1,0 +1,10 @@
+{
+  "cli::InstallCliBinary": {
+    "description": "将 Aaykra 命令行工具安装到系统 PATH。",
+    "name": "安装命令行工具"
+  },
+  "cli::RegisterAaykraScheme": {
+    "description": "注册 aaykra:// 链接的处理程序。",
+    "name": "注册 aaykra:// 链接"
+  }
+}

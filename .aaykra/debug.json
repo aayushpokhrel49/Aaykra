@@ -1,0 +1,11 @@
+[
+  {
+    "label": "Debug Aaykra (CodeLLDB)",
+    "adapter": "CodeLLDB",
+    "build": {
+      "label": "Build Aaykra",
+      "command": "cargo",
+      "args": ["build", "-p", "aaykra", "--bin", "aaykra"],
+    },
+  },
+]

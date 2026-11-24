@@ -1,0 +1,7389 @@
+use agent_harness::{
+    AcpHarness, AgentEvent, CancellationToken, ClaudeHarness, CodexHarness, DoneStatus,
+    ExternalSession, Harness, HarnessId, Model, OpencodeHarness, PermissionMode, ReasoningLevel,
+    RunControls, RunRequest, SkillRef, SlashCommand, Steer, SteerMessage, ToolCall, TurnSettings,
+    UserInputAnswer, UserInputQuestion, usage::PlanUsage,
+};
+use anyhow::{Context as _, Result};
+use collections::{HashMap, HashSet};
+use futures::{FutureExt as _, StreamExt as _, future::Shared};
+use gpui::{
+    App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, SharedString, Task,
+    WeakEntity,
+};
+use i18n::{n, t};
+use language::LanguageRegistry;
+use markdown::Markdown;
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use settings::Settings as _;
+use std::{
+    ops::{ControlFlow, RangeInclusive},
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use util::ResultExt as _;
+
+use crate::{AgentChatSettings, AgentKind};
+
+const FIRST_MESSAGE_TITLE_CHARS: usize = 20;
+const AGENT_TITLE_CHARS: usize = 60;
+const TOOL_OUTPUT_MAX_CHARS: usize = 200_000;
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
+const STOP_IN_PLACE_TIMEOUT: Duration = Duration::from_secs(10);
+const SAVE_INTERVAL_WHILE_WORKING: Duration = Duration::from_secs(5);
+const RUN_INPUT_BATCH: usize = 128;
+const IDLE_SESSION_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const IDLE_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const USAGE_FORCED_MIN_INTERVAL: Duration = Duration::from_secs(30);
+const CATALOG_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const NEW_CHAT_TITLE: &str = n!("New chat");
+const FORKED_NOTICE: &str = n!("Forked from \"{title}\"");
+const SIDE_CHAT_NOTICE: &str = n!("Side chat of \"{title}\"");
+const CONTINUED_NOTICE: &str = n!("Continued from a saved {source} chat");
+const KEEPS_LIMITS_NOTICE: &str =
+    n!("{agent} keeps its current limits until this turn ends, then uses the new permission mode.");
+
+pub(crate) fn display_title(title: &str) -> SharedString {
+    if title.is_empty() {
+        i18n::translate(NEW_CHAT_TITLE)
+    } else if title == agent_harness::opencode::UNTITLED_CHAT {
+        i18n::translate(agent_harness::opencode::UNTITLED_CHAT)
+    } else {
+        SharedString::from(title.to_owned())
+    }
+}
+
+pub(crate) fn translated_notice(text: &SharedString) -> SharedString {
+    if let Some(translation) = i18n::lookup(text) {
+        return translation;
+    }
+    for template in [FORKED_NOTICE, SIDE_CHAT_NOTICE] {
+        for default_title in [NEW_CHAT_TITLE, agent_harness::opencode::UNTITLED_CHAT] {
+            let filled = i18n::format(
+                SharedString::new_static(template),
+                &[("title", &default_title)],
+            );
+            if filled == *text {
+                return i18n::format(
+                    i18n::translate(template),
+                    &[("title", &i18n::translate(default_title))],
+                );
+            }
+        }
+    }
+    i18n::translate_filled(
+        text,
+        &[
+            FORKED_NOTICE,
+            SIDE_CHAT_NOTICE,
+            CONTINUED_NOTICE,
+            KEEPS_LIMITS_NOTICE,
+        ],
+    )
+    .unwrap_or_else(|| text.clone())
+}
+
+fn metadata_path(directory: &Path, id: &str) -> PathBuf {
+    directory.join(format!("{id}.meta.json"))
+}
+
+fn entries_path(directory: &Path, id: &str) -> PathBuf {
+    directory.join(format!("{id}.entries.json"))
+}
+
+fn now() -> i64 {
+    time::OffsetDateTime::now_utc().unix_timestamp()
+}
+
+static FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn write_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let _guard = FILE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let directory = path
+        .parent()
+        .context("session file has no parent directory")?;
+    std::fs::create_dir_all(directory)?;
+    let temporary = path.with_extension("tmp");
+    std::fs::write(&temporary, contents)?;
+    std::fs::rename(&temporary, path)?;
+    Ok(())
+}
+
+pub(crate) fn diff_for_call(call: &ToolCall) -> Option<agent_harness::ToolDiff> {
+    match call {
+        ToolCall::EditFile {
+            path,
+            old_string,
+            new_string: Some(new_string),
+        } => Some(agent_harness::ToolDiff {
+            path: path.clone(),
+            old_text: Some(old_string.clone().unwrap_or_default()),
+            new_text: new_string.clone(),
+        }),
+        ToolCall::WriteFile {
+            path,
+            content: Some(content),
+        } => Some(agent_harness::ToolDiff {
+            path: path.clone(),
+            old_text: None,
+            new_text: content.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn attachment_paths(attachments: &[PathBuf]) -> Vec<String> {
+    attachments
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn turn_settings(settings: &RunSettings) -> TurnSettings {
+    TurnSettings {
+        model: settings.model.clone(),
+        reasoning: settings.reasoning,
+        model_options: settings.options.clone(),
+    }
+}
+
+fn title_from(text: &str) -> String {
+    shortened_title(text, FIRST_MESSAGE_TITLE_CHARS)
+}
+
+fn agent_title(text: &str) -> String {
+    shortened_title(text, AGENT_TITLE_CHARS)
+}
+
+fn shortened_title(text: &str, max_chars: usize) -> String {
+    let line = agent_harness::view::single_line(text);
+    if line.chars().count() <= max_chars {
+        return line;
+    }
+    let mut title: String = line.chars().take(max_chars - 1).collect();
+    title.push('…');
+    title
+}
+
+fn truncate_output(text: String) -> String {
+    if text.chars().count() <= TOOL_OUTPUT_MAX_CHARS {
+        return text;
+    }
+    let mut truncated: String = text.chars().take(TOOL_OUTPUT_MAX_CHARS).collect();
+    truncated.push('…');
+    truncated
+}
+
+impl AgentKind {
+    pub(crate) fn harness_id(self) -> HarnessId {
+        match self {
+            AgentKind::Claude => HarnessId::ClaudeCode,
+            AgentKind::Codex => HarnessId::Codex,
+            AgentKind::Opencode => HarnessId::Opencode,
+            AgentKind::Antigravity => HarnessId::Antigravity,
+        }
+    }
+
+    fn new_harness(self) -> Arc<dyn Harness> {
+        match self {
+            AgentKind::Claude => Arc::new(ClaudeHarness::new()),
+            AgentKind::Codex => Arc::new(CodexHarness::new()),
+            AgentKind::Opencode => Arc::new(OpencodeHarness::new()),
+            AgentKind::Antigravity => {
+                Arc::new(AcpHarness::new(&agent_harness::antigravity::ANTIGRAVITY))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RunSettings {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<ReasoningLevel>,
+    #[serde(default)]
+    pub options: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub permission: PermissionMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSnapshot {
+    pub tokens: Option<u64>,
+    pub window: Option<u64>,
+}
+
+impl ContextSnapshot {
+    pub fn fraction(self) -> Option<f64> {
+        Some(self.tokens? as f64 / self.window.filter(|window| *window > 0)? as f64)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionMetadata {
+    pub id: String,
+    pub kind: AgentKind,
+    pub title: String,
+    pub cwd: PathBuf,
+    pub created_at: i64,
+    pub updated_at: i64,
+    #[serde(default)]
+    pub native_session_id: Option<String>,
+    #[serde(default)]
+    pub settings: RunSettings,
+    #[serde(default)]
+    pub context: Option<ContextSnapshot>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub side_chat: bool,
+    #[serde(default)]
+    pub fork_context: Option<String>,
+    /// The parent's agent session, copied by the agent itself on the fork's first run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork_source: Option<String>,
+    #[serde(default)]
+    pub outcome: Option<ChatOutcome>,
+    #[serde(default)]
+    pub unseen: bool,
+    #[serde(default)]
+    pub project_root: Option<PathBuf>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// The agent's id for a message taken back to edit, forgotten by the agent on the next run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_prompt: Option<String>,
+}
+
+impl SessionMetadata {
+    fn new(kind: AgentKind, cwd: PathBuf, settings: RunSettings) -> Self {
+        let created_at = now();
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            title: String::new(),
+            cwd,
+            created_at,
+            updated_at: created_at,
+            native_session_id: None,
+            settings,
+            context: None,
+            pinned: false,
+            parent_id: None,
+            side_chat: false,
+            fork_context: None,
+            fork_source: None,
+            outcome: None,
+            unseen: false,
+            project_root: None,
+            branch: None,
+            dropped_prompt: None,
+        }
+    }
+
+    pub fn project_root(&self) -> &Path {
+        self.project_root.as_deref().unwrap_or(&self.cwd)
+    }
+
+    fn is_in(&self, roots: &[PathBuf]) -> bool {
+        roots.iter().any(|root| root == self.project_root())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatOutcome {
+    Completed,
+    Errored,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Prompt {
+    pub text: String,
+    pub attachments: Vec<PathBuf>,
+    pub skills: Vec<SkillRef>,
+}
+
+impl Prompt {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            ..Default::default()
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.attachments.is_empty()
+    }
+
+    pub fn merge(&mut self, other: Prompt) {
+        if !other.text.trim().is_empty() {
+            if !self.text.trim().is_empty() {
+                self.text.push_str("\n\n");
+            }
+            self.text.push_str(&other.text);
+        }
+        self.attachments.extend(other.attachments);
+        self.skills.extend(other.skills);
+    }
+}
+
+impl From<String> for Prompt {
+    fn from(text: String) -> Self {
+        Self::text(text)
+    }
+}
+
+impl From<&str> for Prompt {
+    fn from(text: &str) -> Self {
+        Self::text(text)
+    }
+}
+
+pub struct QueuedMessage {
+    pub id: u64,
+    pub prompt: Prompt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolStatus {
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+pub struct ToolEntry {
+    pub id: String,
+    pub call: ToolCall,
+    pub status: ToolStatus,
+    pub output: Option<SharedString>,
+    pub diff: Option<agent_harness::ToolDiff>,
+}
+
+pub enum Entry {
+    User {
+        text: SharedString,
+        at: i64,
+        attachments: Vec<PathBuf>,
+        skills: Vec<SkillRef>,
+        undelivered: bool,
+    },
+    Assistant { markdown: Entity<Markdown>, at: i64 },
+    Thinking(Entity<Markdown>),
+    Tool(ToolEntry),
+    Notice { text: SharedString, is_error: bool },
+    Image { path: PathBuf },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum SerializedEntry {
+    User {
+        text: String,
+        #[serde(default)]
+        at: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<PathBuf>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<SkillRef>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        undelivered: bool,
+    },
+    Assistant {
+        text: String,
+        #[serde(default)]
+        at: i64,
+    },
+    Thinking {
+        text: String,
+    },
+    Tool {
+        id: String,
+        call: ToolCall,
+        status: ToolStatus,
+        #[serde(default)]
+        output: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<agent_harness::ToolDiff>,
+    },
+    Notice {
+        text: String,
+        is_error: bool,
+    },
+    Image {
+        path: PathBuf,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum SavedTranscript {
+    EntriesOnly(Vec<SerializedEntry>),
+    Current {
+        entries: Vec<SerializedEntry>,
+        #[serde(default)]
+        subagents: Vec<SavedSubagent>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        queue: Vec<SavedPrompt>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedPrompt {
+    text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skills: Vec<SkillRef>,
+}
+
+impl From<SavedPrompt> for Prompt {
+    fn from(saved: SavedPrompt) -> Self {
+        Self {
+            text: saved.text,
+            attachments: saved.attachments,
+            skills: saved.skills,
+        }
+    }
+}
+
+impl From<&Prompt> for SavedPrompt {
+    fn from(prompt: &Prompt) -> Self {
+        Self {
+            text: prompt.text.clone(),
+            attachments: prompt.attachments.clone(),
+            skills: prompt.skills.clone(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedSubagent {
+    id: String,
+    entries: Vec<SerializedEntry>,
+    #[serde(default)]
+    status: Option<DoneStatus>,
+}
+
+type TextIdentity = (usize, usize);
+
+fn text_identity(text: &str) -> TextIdentity {
+    (text.as_ptr() as usize, text.len())
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum EntryFingerprint {
+    User {
+        text: TextIdentity,
+        at: i64,
+        attachments: usize,
+        skills: usize,
+        undelivered: bool,
+    },
+    Assistant {
+        markdown: EntityId,
+        source: TextIdentity,
+        at: i64,
+    },
+    Thinking {
+        markdown: EntityId,
+        source: TextIdentity,
+    },
+    Tool {
+        status: ToolStatus,
+        output: Option<TextIdentity>,
+        diff: Option<(TextIdentity, Option<TextIdentity>, TextIdentity)>,
+    },
+    Notice {
+        text: TextIdentity,
+        is_error: bool,
+    },
+    Image {
+        path: TextIdentity,
+    },
+}
+
+impl EntryFingerprint {
+    fn of(entry: &Entry, cx: &App) -> Self {
+        match entry {
+            Entry::User {
+                text,
+                at,
+                attachments,
+                skills,
+                undelivered,
+            } => Self::User {
+                text: text_identity(text),
+                at: *at,
+                attachments: attachments.len(),
+                skills: skills.len(),
+                undelivered: *undelivered,
+            },
+            Entry::Assistant { markdown, at } => Self::Assistant {
+                markdown: markdown.entity_id(),
+                source: text_identity(markdown.read(cx).source()),
+                at: *at,
+            },
+            Entry::Thinking(markdown) => Self::Thinking {
+                markdown: markdown.entity_id(),
+                source: text_identity(markdown.read(cx).source()),
+            },
+            Entry::Tool(tool) => Self::Tool {
+                status: tool.status,
+                output: tool.output.as_ref().map(|output| text_identity(output)),
+                diff: tool.diff.as_ref().map(|diff| {
+                    (
+                        text_identity(&diff.path),
+                        diff.old_text.as_deref().map(text_identity),
+                        text_identity(&diff.new_text),
+                    )
+                }),
+            },
+            Entry::Notice { text, is_error } => Self::Notice {
+                text: text_identity(text),
+                is_error: *is_error,
+            },
+            Entry::Image { path } => {
+                let bytes = path.as_os_str().as_encoded_bytes();
+                Self::Image {
+                    path: (bytes.as_ptr() as usize, bytes.len()),
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct EncodedEntry {
+    /// `None` after a change the fingerprint cannot see, so the entry is encoded again.
+    fingerprint: Option<EntryFingerprint>,
+    json: Arc<RawValue>,
+}
+
+struct EncodedEntries(Arc<Vec<EncodedEntry>>);
+
+impl Serialize for EncodedEntries {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(|entry| &*entry.json))
+    }
+}
+
+/// Writes the same document as `SavedTranscript::Current`.
+#[derive(Serialize)]
+struct EncodedTranscript {
+    entries: EncodedEntries,
+    subagents: Vec<EncodedSubagent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    queue: Vec<SavedPrompt>,
+}
+
+#[derive(Serialize)]
+struct EncodedSubagent {
+    id: String,
+    entries: EncodedEntries,
+    status: Option<DoneStatus>,
+}
+
+#[derive(Default)]
+struct Transcript {
+    entries: Vec<Entry>,
+    text_block_open: bool,
+    encoded: Arc<Vec<EncodedEntry>>,
+    unchanged_prefix: usize,
+}
+
+impl Transcript {
+    fn load(entries: Vec<SerializedEntry>, languages: &Arc<LanguageRegistry>, cx: &mut App) -> Self {
+        Self {
+            entries: entries
+                .into_iter()
+                .filter(|entry| {
+                    !matches!(entry, SerializedEntry::Thinking { text } if text.trim().is_empty())
+                })
+                .map(|entry| deserialize_entry(entry, languages, cx))
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    fn changed(&mut self, index: usize) {
+        self.unchanged_prefix = self.unchanged_prefix.min(index);
+    }
+
+    fn encode_again(&mut self, index: usize) {
+        self.changed(index);
+        if index < self.encoded.len()
+            && let Some(encoded) = Arc::make_mut(&mut self.encoded).get_mut(index)
+        {
+            encoded.fingerprint = None;
+        }
+    }
+
+    fn forget_encoded_from(&mut self, index: usize) {
+        self.changed(index);
+        if index < self.encoded.len() {
+            Arc::make_mut(&mut self.encoded).truncate(index);
+        }
+    }
+
+    fn truncate(&mut self, index: usize) {
+        self.entries.truncate(index);
+        self.forget_encoded_from(index);
+        self.text_block_open = false;
+    }
+
+    fn remove(&mut self, range: RangeInclusive<usize>) {
+        self.forget_encoded_from(*range.start());
+        self.entries.drain(range);
+    }
+
+    fn mark_last_message_undelivered(&mut self) {
+        if let Some(Entry::User { undelivered, .. }) = self.entries.last_mut() {
+            *undelivered = true;
+            self.changed(self.entries.len().saturating_sub(1));
+        }
+    }
+
+    fn encode(&mut self, cx: &App) -> Result<Arc<Vec<EncodedEntry>>> {
+        let start = self.unchanged_prefix.min(self.encoded.len());
+        if start < self.entries.len() || self.entries.len() < self.encoded.len() {
+            let encoded = Arc::make_mut(&mut self.encoded);
+            encoded.truncate(self.entries.len());
+            for (index, entry) in self.entries.iter().enumerate().skip(start) {
+                let fingerprint = Some(EntryFingerprint::of(entry, cx));
+                if encoded
+                    .get(index)
+                    .is_some_and(|known| known.fingerprint == fingerprint)
+                {
+                    continue;
+                }
+                let fresh = EncodedEntry {
+                    fingerprint,
+                    json: serde_json::value::to_raw_value(&serialized_entry(entry, cx))?.into(),
+                };
+                match encoded.get_mut(index) {
+                    Some(known) => *known = fresh,
+                    None => encoded.push(fresh),
+                }
+            }
+        }
+        self.unchanged_prefix = self.entries.len();
+        Ok(self.encoded.clone())
+    }
+
+    fn append_text(
+        &mut self,
+        text: &str,
+        thinking: bool,
+        languages: &Arc<LanguageRegistry>,
+        cx: &mut App,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let extends_last = self.text_block_open
+            && matches!(
+                (self.entries.last(), thinking),
+                (Some(Entry::Assistant { .. }), false) | (Some(Entry::Thinking(_)), true)
+            );
+        if extends_last {
+            self.changed(self.entries.len().saturating_sub(1));
+            match self.entries.last_mut() {
+                Some(Entry::Assistant { markdown, at }) => {
+                    *at = now();
+                    markdown.update(cx, |markdown, cx| markdown.append(text, cx));
+                }
+                Some(Entry::Thinking(markdown)) => {
+                    markdown.update(cx, |markdown, cx| markdown.append(text, cx));
+                }
+                _ => {}
+            }
+        } else {
+            let markdown = new_markdown(text.to_string(), languages, cx);
+            self.entries.push(if thinking {
+                Entry::Thinking(markdown)
+            } else {
+                Entry::Assistant {
+                    markdown,
+                    at: now(),
+                }
+            });
+            self.text_block_open = true;
+        }
+    }
+
+    fn push_user(&mut self, text: String, attachments: Vec<PathBuf>, skills: Vec<SkillRef>) {
+        self.text_block_open = false;
+        self.entries.push(Entry::User {
+            text: text.into(),
+            at: now(),
+            attachments,
+            skills,
+            undelivered: false,
+        });
+    }
+
+    fn push_notice(&mut self, text: String, is_error: bool) {
+        self.text_block_open = false;
+        self.entries.push(Entry::Notice {
+            text: text.into(),
+            is_error,
+        });
+    }
+
+    fn tool_mut(&mut self, id: &str) -> Option<&mut ToolEntry> {
+        let index = self
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::Tool(tool) if tool.id == id))?;
+        self.encode_again(index);
+        match self.entries.get_mut(index) {
+            Some(Entry::Tool(tool)) => Some(tool),
+            _ => None,
+        }
+    }
+
+    fn tool(&self, id: &str) -> Option<&ToolEntry> {
+        self.entries.iter().rev().find_map(|entry| match entry {
+            Entry::Tool(tool) if tool.id == id => Some(tool),
+            _ => None,
+        })
+    }
+
+    fn start_tool(&mut self, id: String, call: ToolCall) {
+        self.text_block_open = false;
+        let diff = diff_for_call(&call);
+        if let Some(tool) = self.tool_mut(&id) {
+            tool.call = call;
+            if diff.is_some() {
+                tool.diff = diff;
+            }
+        } else {
+            self.entries.push(Entry::Tool(ToolEntry {
+                id,
+                call,
+                status: ToolStatus::Running,
+                output: None,
+                diff,
+            }));
+        }
+    }
+
+    fn finish_tool(
+        &mut self,
+        id: &str,
+        is_error: bool,
+        output: Option<String>,
+        diff: Option<agent_harness::ToolDiff>,
+    ) {
+        if let Some(tool) = self.tool_mut(id) {
+            tool.status = if is_error {
+                ToolStatus::Failed
+            } else {
+                ToolStatus::Completed
+            };
+            tool.output = output.map(|output| truncate_output(output).into());
+            if diff.is_some() {
+                tool.diff = diff;
+            }
+        }
+    }
+
+    fn cancel_running_tools(&mut self) {
+        let mut first_canceled = None;
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if let Entry::Tool(tool) = entry
+                && tool.status == ToolStatus::Running
+            {
+                tool.status = ToolStatus::Canceled;
+                first_canceled.get_or_insert(index);
+            }
+        }
+        if let Some(index) = first_canceled {
+            self.changed(index);
+        }
+    }
+
+    fn serialize(&self, cx: &App) -> Vec<SerializedEntry> {
+        self.entries
+            .iter()
+            .map(|entry| serialized_entry(entry, cx))
+            .collect()
+    }
+}
+
+fn serialized_entry(entry: &Entry, cx: &App) -> SerializedEntry {
+    match entry {
+        Entry::User {
+            text,
+            at,
+            attachments,
+            skills,
+            undelivered,
+        } => SerializedEntry::User {
+            text: text.to_string(),
+            at: *at,
+            attachments: attachments.clone(),
+            skills: skills.clone(),
+            undelivered: *undelivered,
+        },
+        Entry::Assistant { markdown, at } => SerializedEntry::Assistant {
+            text: markdown.read(cx).source().to_string(),
+            at: *at,
+        },
+        Entry::Thinking(markdown) => SerializedEntry::Thinking {
+            text: markdown.read(cx).source().to_string(),
+        },
+        Entry::Tool(tool) => SerializedEntry::Tool {
+            id: tool.id.clone(),
+            call: tool.call.clone(),
+            status: tool.status,
+            output: tool.output.as_ref().map(|output| output.to_string()),
+            diff: tool
+                .diff
+                .as_ref()
+                .filter(|diff| diff_for_call(&tool.call).as_ref() != Some(*diff))
+                .cloned(),
+        },
+        Entry::Notice { text, is_error } => SerializedEntry::Notice {
+            text: text.to_string(),
+            is_error: *is_error,
+        },
+        Entry::Image { path } => SerializedEntry::Image { path: path.clone() },
+    }
+}
+
+fn changes_nothing(call: &ToolCall) -> bool {
+    matches!(
+        call,
+        ToolCall::ReadFile { .. }
+            | ToolCall::Search { .. }
+            | ToolCall::Glob { .. }
+            | ToolCall::WebFetch { .. }
+            | ToolCall::WebSearch { .. }
+            | ToolCall::Todo { .. }
+    )
+}
+
+fn new_markdown(text: String, languages: &Arc<LanguageRegistry>, cx: &mut App) -> Entity<Markdown> {
+    let languages = languages.clone();
+    cx.new(|cx| Markdown::new(text.into(), Some(languages), None, cx))
+}
+
+fn saved_markdown(
+    text: String,
+    languages: &Arc<LanguageRegistry>,
+    cx: &mut App,
+) -> Entity<Markdown> {
+    let languages = languages.clone();
+    cx.new(|cx| Markdown::new_deferred(text.into(), Some(languages), None, cx))
+}
+
+fn deserialize_entry(
+    entry: SerializedEntry,
+    languages: &Arc<LanguageRegistry>,
+    cx: &mut App,
+) -> Entry {
+    match entry {
+        SerializedEntry::User {
+            text,
+            at,
+            attachments,
+            skills,
+            undelivered,
+        } => Entry::User {
+            text: text.into(),
+            at,
+            attachments,
+            skills,
+            undelivered,
+        },
+        SerializedEntry::Assistant { text, at } => Entry::Assistant {
+            markdown: saved_markdown(text, languages, cx),
+            at,
+        },
+        SerializedEntry::Thinking { text } => Entry::Thinking(saved_markdown(text, languages, cx)),
+        SerializedEntry::Tool {
+            id,
+            call,
+            status,
+            output,
+            diff,
+        } => Entry::Tool(ToolEntry {
+            diff: diff.or_else(|| diff_for_call(&call)),
+            id,
+            call,
+            status: if status == ToolStatus::Running {
+                ToolStatus::Canceled
+            } else {
+                status
+            },
+            output: output.map(Into::into),
+        }),
+        SerializedEntry::Notice { text, is_error } => Entry::Notice {
+            text: text.into(),
+            is_error,
+        },
+        SerializedEntry::Image { path } => Entry::Image { path },
+    }
+}
+
+pub struct Subagent {
+    transcript: Transcript,
+    status: Option<DoneStatus>,
+    started_at: Instant,
+}
+
+impl Subagent {
+    fn new() -> Self {
+        Self {
+            transcript: Transcript::default(),
+            status: None,
+            started_at: Instant::now(),
+        }
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.transcript.entries
+    }
+
+    pub fn status(&self) -> Option<DoneStatus> {
+        self.status
+    }
+
+    pub fn started_at(&self) -> Instant {
+        self.started_at
+    }
+}
+
+#[derive(Clone)]
+pub struct BackgroundTask {
+    pub task_id: String,
+    pub tool_use_id: Option<String>,
+    pub kind: agent_harness::BackgroundTaskKind,
+    pub description: String,
+    pub started_at: Instant,
+}
+
+pub struct PendingQuestion {
+    pub questions: Vec<UserInputQuestion>,
+    responder: Option<tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>>,
+}
+
+impl PendingQuestion {
+    pub fn id(&self) -> &str {
+        self.questions
+            .first()
+            .map(|question| question.id.as_str())
+            .unwrap_or_default()
+    }
+
+    /// A tool permission request from the harness, not an agent question that happens to look like one.
+    fn is_tool_permission(&self) -> bool {
+        self.is_permission()
+            && self.questions.iter().all(|question| {
+                question.options
+                    == [
+                        agent_harness::claude::PERMISSION_ALLOW,
+                        agent_harness::claude::PERMISSION_DENY,
+                    ]
+            })
+    }
+
+    pub fn is_permission(&self) -> bool {
+        !self.questions.is_empty()
+            && self
+                .questions
+                .iter()
+            .all(|question| question.header == agent_harness::claude::PERMISSION_HEADER)
+    }
+}
+
+async fn agent_stopped_waiting(
+    mut agent: tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
+    chat: tokio::sync::oneshot::Receiver<Vec<UserInputAnswer>>,
+) -> bool {
+    let answered = {
+        let withdrawn = std::pin::pin!(agent.closed());
+        match futures::future::select(chat, withdrawn).await {
+            futures::future::Either::Left((answer, _)) => Some(answer),
+            futures::future::Either::Right(_) => None,
+        }
+    };
+    match answered {
+        Some(Ok(answers)) => {
+            if agent.send(answers).is_err() {
+                log::debug!("agent stopped waiting for an answer");
+            }
+            false
+        }
+        Some(Err(_)) => false,
+        None => true,
+    }
+}
+
+enum RunInput {
+    Event(Result<AgentEvent, agent_harness::HarnessError>),
+    Question {
+        questions: Vec<UserInputQuestion>,
+        responder: tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
+    },
+    Ended,
+}
+
+struct PendingSave {
+    due: Instant,
+    _timer: Task<()>,
+}
+
+enum IdleCheck {
+    Busy,
+    Wait(Duration),
+    Unneeded,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ListedState {
+    working: bool,
+    needs_input: bool,
+    deleted: bool,
+}
+
+struct ActiveRun {
+    steering: tokio::sync::mpsc::Sender<Steer>,
+    interrupt: CancellationToken,
+    stopping_turn: bool,
+    stop_acknowledged: Option<tokio::sync::oneshot::Receiver<()>>,
+    stop_timeout: Option<Task<()>>,
+    permission: tokio::sync::watch::Sender<PermissionMode>,
+    _events: Task<()>,
+}
+
+impl ActiveRun {
+    fn stopping(&self) -> bool {
+        self.stopping_turn || self.interrupt.is_cancelled()
+    }
+
+    /// Whether a requested stop left the agent running. An agent that didn't say so is ending.
+    fn settle_stop(&mut self) -> bool {
+        if !std::mem::take(&mut self.stopping_turn) {
+            return false;
+        }
+        self.stop_timeout = None;
+        let acknowledged = self
+            .stop_acknowledged
+            .take()
+            .is_some_and(|mut acknowledged| acknowledged.try_recv().is_ok());
+        let in_place = acknowledged && !self.interrupt.is_cancelled();
+        if !in_place {
+            self.interrupt.cancel();
+        }
+        in_place
+    }
+}
+
+pub enum SessionEvent {
+    MetadataChanged,
+    SettingsChanged,
+    Finished { errored: bool },
+    NeedsInput,
+    CommandsReported(Vec<SlashCommand>),
+}
+
+pub struct AgentSession {
+    directory: Arc<Path>,
+    working_since: Option<Instant>,
+    run_failed: bool,
+    harness: Arc<dyn Harness>,
+    restart_on_next_send: bool,
+    unsent_settings: bool,
+    runs_started: u64,
+    native_fork_prompt: Option<Prompt>,
+    native_fork_failed: bool,
+    native_fork_errors: Vec<String>,
+    metadata: SessionMetadata,
+    transcript: Transcript,
+    subagents: HashMap<String, Subagent>,
+    working: bool,
+    compacting: bool,
+    background_tasks: Vec<BackgroundTask>,
+    known_tasks: HashMap<String, BackgroundTask>,
+    run: Option<ActiveRun>,
+    prompt_after_stop: Option<Prompt>,
+    user_stopped: bool,
+    turn_prompts: usize,
+    turn_prompt_id: Option<String>,
+    editable_prompt: Option<String>,
+    queue: Vec<QueuedMessage>,
+    next_queue_id: u64,
+    editing_queued: Option<u64>,
+    deleted: bool,
+    pending_questions: Vec<PendingQuestion>,
+    noticed_auto_unavailable: bool,
+    languages: Arc<LanguageRegistry>,
+    save_metadata_task: Task<()>,
+    save_entries_task: Task<()>,
+    pending_entries_save: Option<PendingSave>,
+    unfinished_writes: Arc<()>,
+    active_at: Instant,
+}
+
+impl EventEmitter<SessionEvent> for AgentSession {}
+
+impl AgentSession {
+    fn new(
+        directory: Arc<Path>,
+        harness: Arc<dyn Harness>,
+        metadata: SessionMetadata,
+        saved: SavedTranscript,
+        languages: Arc<LanguageRegistry>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (entries, saved_subagents, saved_queue) = match saved {
+            SavedTranscript::Current {
+                entries,
+                subagents,
+                queue,
+            } => (entries, subagents, queue),
+            SavedTranscript::EntriesOnly(entries) => (entries, Vec::new(), Vec::new()),
+        };
+        let transcript = Transcript::load(entries, &languages, cx);
+        let subagents = saved_subagents
+            .into_iter()
+            .map(|saved| {
+                let subagent = Subagent {
+                    transcript: Transcript::load(saved.entries, &languages, cx),
+                    status: Some(saved.status.unwrap_or(DoneStatus::Interrupted)),
+                    started_at: Instant::now(),
+                };
+                (saved.id, subagent)
+            })
+            .collect();
+        Self {
+            directory,
+            working_since: None,
+            run_failed: false,
+            harness,
+            restart_on_next_send: false,
+            unsent_settings: false,
+            runs_started: 0,
+            native_fork_prompt: None,
+            native_fork_failed: false,
+            native_fork_errors: Vec::new(),
+            metadata,
+            transcript,
+            subagents,
+            working: false,
+            compacting: false,
+            background_tasks: Vec::new(),
+            known_tasks: HashMap::default(),
+            run: None,
+            prompt_after_stop: None,
+            user_stopped: false,
+            turn_prompts: 0,
+            turn_prompt_id: None,
+            editable_prompt: None,
+            queue: saved_queue
+                .into_iter()
+                .enumerate()
+                .map(|(index, prompt)| QueuedMessage {
+                    id: index as u64,
+                    prompt: prompt.into(),
+                })
+                .collect(),
+            next_queue_id: u64::MAX / 2,
+            editing_queued: None,
+            deleted: false,
+            pending_questions: Vec::new(),
+            noticed_auto_unavailable: false,
+            languages,
+            save_metadata_task: Task::ready(()),
+            save_entries_task: Task::ready(()),
+            pending_entries_save: None,
+            unfinished_writes: Arc::new(()),
+            active_at: Instant::now(),
+        }
+    }
+
+    pub fn metadata(&self) -> &SessionMetadata {
+        &self.metadata
+    }
+
+    pub fn kind(&self) -> AgentKind {
+        self.metadata.kind
+    }
+
+    pub fn entries(&self) -> &[Entry] {
+        &self.transcript.entries
+    }
+
+    pub fn subagent(&self, id: &str) -> Option<&Subagent> {
+        self.subagents.get(id)
+    }
+
+    pub fn subagent_running(&self, id: &str) -> bool {
+        let Some(subagent) = self.subagents.get(id) else {
+            return false;
+        };
+        let spawn_running = std::iter::once(&self.transcript)
+            .chain(self.subagents.values().map(|subagent| &subagent.transcript))
+            .find_map(|transcript| transcript.tool(id))
+            .is_some_and(|tool| tool.status == ToolStatus::Running);
+        let backgrounded = self
+            .background_tasks
+            .iter()
+            .chain(self.known_tasks.values())
+            .any(|task| task.tool_use_id.as_deref() == Some(id));
+        subagent.status.is_none()
+            && self.run.is_some()
+            && (spawn_running || backgrounded || self.working)
+    }
+
+    pub fn mark_seen(&mut self, cx: &mut Context<Self>) {
+        if self.metadata.unseen {
+            self.metadata.unseen = false;
+            self.save_metadata(cx);
+            cx.dismiss_system_notification(&self.metadata.id);
+        }
+    }
+
+    pub fn update_metadata(&mut self, change: impl FnOnce(&mut SessionMetadata), cx: &mut Context<Self>) {
+        change(&mut self.metadata);
+        self.save_metadata(cx);
+        cx.notify();
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.deleted
+    }
+
+    pub fn is_working(&self) -> bool {
+        self.working
+    }
+
+    fn listed_state(&self) -> ListedState {
+        ListedState {
+            working: self.working,
+            needs_input: !self.pending_questions.is_empty(),
+            deleted: self.deleted,
+        }
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.pending_entries_save.is_some() || Arc::strong_count(&self.unfinished_writes) > 1
+    }
+
+    fn must_stay_loaded(&self) -> bool {
+        self.run.is_some() || self.working || self.has_unsaved_changes()
+    }
+
+    fn run_is_quiet(&self) -> bool {
+        self.run.as_ref().is_some_and(|run| !run.stopping())
+            && !self.working
+            && self.pending_questions.is_empty()
+            && self.background_tasks.is_empty()
+            && self.known_tasks.is_empty()
+            && self.queue.is_empty()
+            && self.prompt_after_stop.is_none()
+            && self.metadata.native_session_id.is_some()
+    }
+
+    fn release_when_idle(&mut self, idle_for: Duration, cx: &mut Context<Self>) -> IdleCheck {
+        if self.working {
+            return IdleCheck::Busy;
+        }
+        let remaining = idle_for.saturating_sub(self.active_at.elapsed());
+        if !remaining.is_zero() {
+            return IdleCheck::Wait(remaining);
+        }
+        if self.run_is_quiet() {
+            self.run = None;
+            cx.notify();
+        }
+        if self.must_stay_loaded() {
+            IdleCheck::Wait(IDLE_RECHECK_INTERVAL)
+        } else {
+            IdleCheck::Unneeded
+        }
+    }
+
+    fn agent_activity(&self) -> Option<workspace::AgentActivity> {
+        if self.deleted {
+            None
+        } else if !self.pending_questions.is_empty() {
+            Some(workspace::AgentActivity::NeedsInput)
+        } else if self.working {
+            Some(workspace::AgentActivity::Working)
+        } else {
+            None
+        }
+    }
+
+    fn auto_compact_tokens(&self, cx: &App) -> Option<u64> {
+        let limit = AgentChatSettings::get_global(cx).auto_compact_tokens?;
+        let window = self.metadata.context.and_then(|context| context.window);
+        Some(match (self.metadata.kind, window) {
+            // Codex may not cap the limit at its context window, and would then never compact.
+            (AgentKind::Codex, Some(window)) if window > 0 => limit.min(window * 9 / 10),
+            _ => limit,
+        })
+    }
+
+    pub fn background_tasks(&self) -> &[BackgroundTask] {
+        &self.background_tasks
+    }
+
+    pub fn tool_entry(&self, id: &str) -> Option<&ToolEntry> {
+        std::iter::once(&self.transcript)
+            .chain(self.subagents.values().map(|subagent| &subagent.transcript))
+            .find_map(|transcript| transcript.tool(id))
+    }
+
+    pub fn is_compacting(&self) -> bool {
+        self.working && self.compacting
+    }
+
+    pub fn can_steer(&self, prompt: &Prompt) -> bool {
+        // Claude reads a slash command sent into a running turn as plain text.
+        self.working
+            && !(self.metadata.kind == AgentKind::Claude
+                && agent_harness::leading_command(&prompt.text).is_some())
+    }
+
+    pub fn working_since(&self) -> Option<Instant> {
+        self.working.then_some(self.working_since).flatten()
+    }
+
+    pub fn run_failed(&self) -> bool {
+        self.run_failed
+    }
+
+    pub fn pending_questions(&self) -> &[PendingQuestion] {
+        &self.pending_questions
+    }
+
+    pub fn settings(&self) -> &RunSettings {
+        &self.metadata.settings
+    }
+
+    pub fn context(&self) -> Option<ContextSnapshot> {
+        self.metadata.context
+    }
+
+    /// Model and effort are launch flags: a change takes effect by resuming in a new process.
+    pub fn update_settings(
+        &mut self,
+        change: impl FnOnce(&mut RunSettings),
+        cx: &mut Context<Self>,
+    ) {
+        if self.change_settings(change, cx) {
+            cx.emit(SessionEvent::SettingsChanged);
+        }
+    }
+
+    /// Like `update_settings`, but not remembered as the default for new chats.
+    pub fn pin_settings(&mut self, change: impl FnOnce(&mut RunSettings), cx: &mut Context<Self>) {
+        let (restart_on_next_send, unsent_settings) =
+            (self.restart_on_next_send, self.unsent_settings);
+        self.change_settings(change, cx);
+        self.restart_on_next_send = restart_on_next_send;
+        self.unsent_settings = unsent_settings;
+    }
+
+    fn change_settings(
+        &mut self,
+        change: impl FnOnce(&mut RunSettings),
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let before = self.metadata.settings.clone();
+        change(&mut self.metadata.settings);
+        if self.metadata.settings == before {
+            return false;
+        }
+        let permission = self.metadata.settings.permission;
+        if permission != before.permission {
+            self.apply_permission_now(permission, cx);
+        }
+        let (old, new) = (
+            turn_settings(&before),
+            turn_settings(&self.metadata.settings),
+        );
+        // Codex gets its compaction limit, which is sized to the model, only at launch.
+        let compaction_limit_is_stale = self.metadata.kind == AgentKind::Codex
+            && old.model != new.model
+            && AgentChatSettings::get_global(cx)
+                .auto_compact_tokens
+                .is_some();
+        if self.run.is_none() {
+            self.restart_on_next_send = false;
+            self.unsent_settings = false;
+        } else if old != new
+            && permission == before.permission
+            && !compaction_limit_is_stale
+            && self.harness.applies_settings_live(&old, &new)
+        {
+            self.unsent_settings = true;
+        } else {
+            self.restart_on_next_send = true;
+        }
+        self.save_metadata(cx);
+        cx.notify();
+        true
+    }
+
+    pub fn queue(&self) -> &[QueuedMessage] {
+        &self.queue
+    }
+
+    pub fn send_message(&mut self, prompt: impl Into<Prompt>, cx: &mut Context<Self>) {
+        let mut prompt = prompt.into();
+        prompt.text = prompt.text.trim().to_string();
+        if prompt.is_empty() || self.deleted {
+            return;
+        }
+        let stopping = self.run.as_ref().is_some_and(ActiveRun::stopping);
+        if self.working && self.run.is_some() && !stopping {
+            if AgentChatSettings::get_global(cx).steer_while_working {
+                self.deliver(prompt, cx);
+            } else {
+                self.enqueue(prompt, cx);
+            }
+            return;
+        }
+        if !stopping && self.has_sendable_queued() {
+            self.enqueue(prompt, cx);
+            if let Some(next) = self.take_next_queued() {
+                self.deliver(next.prompt, cx);
+            }
+            return;
+        }
+        self.deliver(prompt, cx);
+    }
+
+    fn has_sendable_queued(&self) -> bool {
+        self.queue
+            .iter()
+            .any(|queued| Some(queued.id) != self.editing_queued)
+    }
+
+    fn take_next_queued(&mut self) -> Option<QueuedMessage> {
+        let index = self
+            .queue
+            .iter()
+            .position(|queued| Some(queued.id) != self.editing_queued)?;
+        Some(self.queue.remove(index))
+    }
+
+    fn enqueue(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
+        self.next_queue_id += 1;
+        self.queue.push(QueuedMessage {
+            id: self.next_queue_id,
+            prompt,
+        });
+        self.save_entries_soon(cx);
+        cx.notify();
+    }
+
+    fn take_queued(&mut self, id: u64) -> Option<(usize, Prompt)> {
+        let index = self.queue.iter().position(|queued| queued.id == id)?;
+        if self.editing_queued == Some(id) {
+            self.editing_queued = None;
+        }
+        Some((index, self.queue.remove(index).prompt))
+    }
+
+    pub fn steer_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some((_, prompt)) = self.take_queued(id) {
+            self.deliver(prompt, cx);
+        }
+    }
+
+    pub fn send_queued_now(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some((_, prompt)) = self.take_queued(id) else {
+            return;
+        };
+        if self.working {
+            self.interrupt_run(cx);
+        }
+        self.deliver(prompt, cx);
+    }
+
+    pub fn remove_queued(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.take_queued(id).is_some() {
+            self.save_entries_soon(cx);
+            cx.notify();
+        }
+    }
+
+    pub fn move_queued(&mut self, id: u64, to_index: usize, cx: &mut Context<Self>) {
+        let Some(from) = self.queue.iter().position(|queued| queued.id == id) else {
+            return;
+        };
+        let queued = self.queue.remove(from);
+        let to_index = to_index.min(self.queue.len());
+        self.queue.insert(to_index, queued);
+        self.save_entries_soon(cx);
+        cx.notify();
+    }
+
+    pub fn editing_queued(&self) -> Option<u64> {
+        self.editing_queued
+    }
+
+    pub fn begin_queued_edit(&mut self, id: u64, cx: &mut Context<Self>) -> Option<Prompt> {
+        let queued = self.queue.iter().find(|queued| queued.id == id)?;
+        let prompt = queued.prompt.clone();
+        self.editing_queued = Some(id);
+        cx.notify();
+        Some(prompt)
+    }
+
+    pub fn finish_queued_edit(
+        &mut self,
+        id: u64,
+        edited: Option<Prompt>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editing_queued == Some(id) {
+            self.editing_queued = None;
+        }
+        if let Some(prompt) = edited.filter(|prompt| !prompt.is_empty()) {
+            match self.queue.iter_mut().find(|queued| queued.id == id) {
+                Some(queued) => queued.prompt = prompt,
+                None => self.enqueue(prompt, cx),
+            }
+            self.save_entries_soon(cx);
+        }
+        cx.notify();
+    }
+
+    /// The last message, once the user stops its turn before the agent changed anything.
+    pub fn editable_message(&self) -> Option<usize> {
+        if self.editable_prompt.is_none() || self.working {
+            return None;
+        }
+        let index = self.last_user_index()?;
+        self.transcript.entries[index + 1..]
+            .iter()
+            .all(|entry| match entry {
+                Entry::Tool(tool) => changes_nothing(&tool.call),
+                _ => true,
+            })
+            .then_some(index)
+    }
+
+    pub fn edit_last_message(&mut self, cx: &mut Context<Self>) -> Option<Prompt> {
+        let index = self.editable_message()?;
+        let Some(Entry::User {
+            text,
+            attachments,
+            skills,
+            ..
+        }) = self.transcript.entries.get(index)
+        else {
+            return None;
+        };
+        let prompt = Prompt {
+            text: text.to_string(),
+            attachments: attachments.clone(),
+            skills: skills.clone(),
+        };
+        self.transcript.truncate(index);
+        self.metadata.dropped_prompt = self.editable_prompt.take();
+        if self.last_user_index().is_none() && self.metadata.title == title_from(&prompt.text) {
+            self.metadata.title.clear();
+        }
+        self.save_metadata(cx);
+        self.save_entries_soon(cx);
+        cx.notify();
+        Some(prompt)
+    }
+
+    fn last_user_index(&self) -> Option<usize> {
+        self.transcript
+            .entries
+            .iter()
+            .rposition(|entry| matches!(entry, Entry::User { .. }))
+    }
+
+    pub fn retry_undelivered(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(Entry::User {
+            text,
+            attachments,
+            skills,
+            undelivered: true,
+            ..
+        }) = self.transcript.entries.get(index)
+        else {
+            return;
+        };
+        let prompt = Prompt {
+            text: text.to_string(),
+            attachments: attachments.clone(),
+            skills: skills.clone(),
+        };
+        let notices = self.transcript.entries[index + 1..]
+            .iter()
+            .take_while(|entry| matches!(entry, Entry::Notice { is_error: true, .. }))
+            .count();
+        self.transcript.remove(index..=index + notices);
+        self.send_message(prompt, cx);
+    }
+
+    fn deliver(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
+        let stopping = self.run.as_ref().is_some_and(ActiveRun::stopping);
+        let is_command = |prompt: &Prompt| agent_harness::leading_command(&prompt.text).is_some();
+        let steering_command = self.run.is_some() && !stopping && !self.can_steer(&prompt);
+        // Merging would turn the other message into the command's arguments.
+        let merging_command = stopping
+            && self
+                .prompt_after_stop
+                .as_ref()
+                .is_some_and(|pending| is_command(pending) || is_command(&prompt));
+        if self.working && (steering_command || merging_command) {
+            self.next_queue_id += 1;
+            self.queue.insert(
+                0,
+                QueuedMessage {
+                    id: self.next_queue_id,
+                    prompt,
+                },
+            );
+            self.save_entries(cx);
+            cx.notify();
+            return;
+        }
+        self.user_stopped = false;
+        self.editable_prompt = None;
+        let new_turn = !self.working;
+        if self.metadata.title.is_empty() {
+            self.metadata.title = title_from(&prompt.text);
+        }
+        self.transcript.push_user(
+            prompt.text.clone(),
+            prompt.attachments.clone(),
+            prompt.skills.clone(),
+        );
+        if !self.working {
+            self.working_since = Some(Instant::now());
+        }
+        self.working = true;
+        self.run_failed = false;
+        self.metadata.outcome = None;
+        self.touch(cx);
+
+        if self.run.as_ref().is_some_and(ActiveRun::stopping) {
+            match &mut self.prompt_after_stop {
+                Some(pending) => pending.merge(prompt),
+                None => self.prompt_after_stop = Some(prompt),
+            }
+            cx.notify();
+            return;
+        }
+        self.hand_to_agent(prompt, new_turn, cx);
+    }
+
+    fn hand_to_agent(&mut self, prompt: Prompt, new_turn: bool, cx: &mut Context<Self>) {
+        if new_turn && (self.restart_on_next_send || self.metadata.dropped_prompt.is_some()) {
+            self.run = None;
+            self.restart_on_next_send = false;
+        }
+        if let Some(run) = &self.run {
+            let steer = SteerMessage {
+                prompt: prompt.text.clone(),
+                message_id: None,
+                attachments: attachment_paths(&prompt.attachments),
+                skills: prompt.skills.clone(),
+                settings: self
+                    .unsent_settings
+                    .then(|| turn_settings(&self.metadata.settings)),
+            };
+            if run.steering.try_send(Steer::Message(steer)).is_ok() {
+                self.unsent_settings = false;
+                if new_turn {
+                    self.turn_prompts = 1;
+                    self.turn_prompt_id = None;
+                } else {
+                    self.turn_prompts += 1;
+                }
+                cx.notify();
+                return;
+            }
+            self.run = None;
+        }
+        self.start_run(prompt, cx);
+    }
+
+    pub fn stop(&mut self, cx: &mut Context<Self>) {
+        self.prompt_after_stop = None;
+        self.user_stopped = true;
+        if self.run.is_some() {
+            self.interrupt_run(cx);
+        } else {
+            self.working = false;
+            cx.notify();
+        }
+    }
+
+    /// A second stop, or a stop with steered messages or background work in play, ends the whole run.
+    fn interrupt_run(&mut self, cx: &mut Context<Self>) {
+        let subagent_working = self.subagents.iter().any(|(id, subagent)| {
+            subagent.status.is_none()
+                && self
+                    .tool_entry(id)
+                    .is_some_and(|spawn| spawn.status == ToolStatus::Running)
+        });
+        let in_place = self.working
+            && self.harness.stops_turn_in_place()
+            && !self.compacting
+            && self.turn_prompts <= 1
+            && self.background_tasks.is_empty()
+            && self.known_tasks.is_empty()
+            && !subagent_working;
+        let Some(run) = &mut self.run else {
+            return;
+        };
+        let (acknowledge, acknowledged) = tokio::sync::oneshot::channel();
+        if in_place
+            && !run.stopping()
+            && run.steering.try_send(Steer::StopTurn(acknowledge)).is_ok()
+        {
+            run.stopping_turn = true;
+            run.stop_acknowledged = Some(acknowledged);
+            let interrupt = run.interrupt.clone();
+            run.stop_timeout = Some(cx.spawn(async move |_, cx| {
+                cx.background_executor().timer(STOP_IN_PLACE_TIMEOUT).await;
+                interrupt.cancel();
+            }));
+        } else {
+            run.interrupt.cancel();
+        }
+    }
+
+    fn turn_stopped_in_place(&mut self, status: DoneStatus, cx: &mut Context<Self>) {
+        self.pending_questions.clear();
+        match self.prompt_after_stop.take() {
+            Some(prompt) if !self.deleted => {
+                self.working = true;
+                self.working_since = Some(Instant::now());
+                self.hand_to_agent(prompt, true, cx);
+            }
+            _ => {
+                self.working = false;
+                if status != DoneStatus::Interrupted || !self.user_stopped {
+                    self.send_next_queued(cx);
+                }
+            }
+        }
+    }
+
+    pub fn answer(&mut self, id: &str, answers: Vec<UserInputAnswer>, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .pending_questions
+            .iter()
+            .position(|pending| pending.id() == id)
+        else {
+            return;
+        };
+        let mut pending = self.pending_questions.remove(index);
+        cx.dismiss_system_notification(&self.metadata.id);
+        if let Some(responder) = pending.responder.take()
+            && responder.send(answers).is_err()
+        {
+            log::debug!("agent stopped waiting for an answer");
+        }
+        cx.notify();
+    }
+
+    fn drop_withdrawn_questions(&mut self, cx: &mut Context<Self>) {
+        let before = self.pending_questions.len();
+        self.pending_questions.retain(|pending| {
+            !pending
+                .responder
+                .as_ref()
+                .is_some_and(tokio::sync::oneshot::Sender::is_closed)
+        });
+        if self.pending_questions.len() == before {
+            return;
+        }
+        if self.pending_questions.is_empty() {
+            cx.dismiss_system_notification(&self.metadata.id);
+        }
+        cx.notify();
+    }
+
+    fn apply_permission_now(&mut self, permission: PermissionMode, cx: &mut Context<Self>) {
+        if let Some(run) = &self.run {
+            run.permission.send_replace(permission);
+        }
+        if self.skips_prompts() {
+            let waiting: Vec<String> = self
+                .pending_questions
+                .iter()
+                .filter(|pending| pending.is_tool_permission())
+                .map(|pending| pending.id().to_string())
+                .collect();
+            for id in waiting {
+                self.answer_permission(&id, true, cx);
+            }
+        } else if self.working && !matches!(self.kind(), AgentKind::Claude | AgentKind::Antigravity)
+        {
+            let notice = i18n::format(
+                SharedString::new_static(KEEPS_LIMITS_NOTICE),
+                &[("agent", &self.kind().label())],
+            );
+            self.push_notice(notice.to_string(), false, cx);
+        }
+    }
+
+    fn skips_prompts(&self) -> bool {
+        self.metadata
+            .settings
+            .permission
+            .for_harness(self.kind().harness_id())
+            .skips_prompts()
+    }
+
+    pub fn answer_permission(&mut self, id: &str, allow: bool, cx: &mut Context<Self>) {
+        let Some(pending) = self
+            .pending_questions
+            .iter()
+            .find(|pending| pending.id() == id)
+        else {
+            return;
+        };
+        let label = if allow {
+            agent_harness::claude::PERMISSION_ALLOW
+        } else {
+            agent_harness::claude::PERMISSION_DENY
+        };
+        let answers = pending
+            .questions
+            .iter()
+            .map(|question| UserInputAnswer {
+                question_id: question.id.clone(),
+                labels: vec![label.to_string()],
+            })
+            .collect();
+        self.answer(id, answers, cx);
+    }
+
+    fn start_run(&mut self, prompt: Prompt, cx: &mut Context<Self>) {
+        self.restart_on_next_send = false;
+        self.unsent_settings = false;
+        self.runs_started += 1;
+        let run_number = self.runs_started;
+        self.turn_prompts = 1;
+        self.turn_prompt_id = None;
+        let drop_prompt = self.metadata.dropped_prompt.take();
+        if drop_prompt.is_some() {
+            self.save_metadata(cx);
+        }
+        let harness = self.harness.clone();
+        if self.metadata.native_session_id.is_none() {
+            self.metadata.context = None;
+        }
+        let fork = self
+            .metadata
+            .native_session_id
+            .is_none()
+            .then(|| self.metadata.fork_source.clone())
+            .flatten();
+        self.native_fork_prompt = fork.is_some().then(|| prompt.clone());
+        self.native_fork_errors.clear();
+        let text = match self.metadata.fork_context.take() {
+            context if fork.is_some() => {
+                self.metadata.fork_context = context;
+                prompt.text.clone()
+            }
+            Some(context) if agent_harness::leading_command(&prompt.text).is_none() => {
+                self.save_metadata(cx);
+                format!(
+                    "Continue this conversation using the following prior conversation as context.\n<conversation>\n{context}\n</conversation>\n\n{}",
+                    prompt.text
+                )
+            }
+            context => {
+                self.metadata.fork_context = context;
+                prompt.text.clone()
+            }
+        };
+        let settings = self.metadata.settings.clone();
+        let request = RunRequest {
+            prompt: text,
+            attachments: attachment_paths(&prompt.attachments),
+            skills: prompt.skills.clone(),
+            model: settings.model,
+            reasoning: settings.reasoning,
+            model_options: settings.options,
+            cwd: self.metadata.cwd.to_string_lossy().into_owned(),
+            permission: settings.permission,
+            resume: self.metadata.native_session_id.clone(),
+            fork,
+            auto_compact_tokens: self.auto_compact_tokens(cx),
+            chrome: AgentChatSettings::get_global(cx).claude_in_chrome,
+            drop_prompt,
+            ephemeral: false,
+        };
+        let (steering_tx, steering_rx) = tokio::sync::mpsc::channel(32);
+        let interrupt = CancellationToken::new();
+        let (permission_tx, permission_rx) = tokio::sync::watch::channel(settings.permission);
+        let (question_tx, question_rx) = futures::channel::mpsc::unbounded::<(
+            Vec<UserInputQuestion>,
+            tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
+        )>();
+        let controls = RunControls {
+            request_input: Box::new(move |questions| {
+                let (answer_tx, answer_rx) = tokio::sync::oneshot::channel();
+                if question_tx.unbounded_send((questions, answer_tx)).is_err() {
+                    log::debug!("agent asked a question after its chat closed");
+                }
+                answer_rx
+            }),
+            steering: steering_rx,
+            interrupt: interrupt.clone(),
+            permission: permission_rx,
+        };
+
+        let run = spawn_agent_work(cx, async move { harness.run(request, controls).await });
+        let events = cx.spawn(async move |this, cx| {
+            let stream = match run.await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => {
+                    this.update(cx, |this, cx| this.fail_run(error.to_string(), cx))
+                        .log_err();
+                    return;
+                }
+                Err(error) => {
+                    this.update(cx, |this, cx| this.fail_run(error.to_string(), cx))
+                        .log_err();
+                    return;
+                }
+            };
+            let events = stream
+                .map(RunInput::Event)
+                .chain(futures::stream::iter([RunInput::Ended]));
+            let questions = question_rx.map(|(questions, responder)| RunInput::Question {
+                questions,
+                responder,
+            });
+            let mut inputs =
+                futures::stream::select(events, questions).ready_chunks(RUN_INPUT_BATCH);
+            while let Some(batch) = inputs.next().await {
+                let Ok(stream) = this.update(cx, |this, cx| this.apply_run_inputs(batch, cx))
+                else {
+                    return;
+                };
+                if stream.is_break() {
+                    break;
+                }
+            }
+            this.update(cx, |this, cx| {
+                // A queued message can already have started the next run from this one's last events.
+                if this.runs_started == run_number {
+                    this.run_ended(cx);
+                }
+            })
+            .log_err();
+        });
+        self.run = Some(ActiveRun {
+            steering: steering_tx,
+            interrupt,
+            stopping_turn: false,
+            stop_acknowledged: None,
+            stop_timeout: None,
+            permission: permission_tx,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    fn apply_run_inputs(
+        &mut self,
+        inputs: Vec<RunInput>,
+        cx: &mut Context<Self>,
+    ) -> ControlFlow<()> {
+        for input in inputs {
+            match input {
+                RunInput::Event(Ok(event)) => self.apply_event(event, cx),
+                RunInput::Event(Err(error)) => self.push_notice(error.to_string(), true, cx),
+                RunInput::Question {
+                    questions,
+                    responder,
+                } => {
+                    let (relay_tx, relay_rx) = tokio::sync::oneshot::channel();
+                    cx.spawn(async move |this, cx| {
+                        if agent_stopped_waiting(responder, relay_rx).await {
+                            this.update(cx, |this, cx| this.drop_withdrawn_questions(cx))
+                                .log_err();
+                        }
+                    })
+                    .detach();
+                    self.push_question(questions, relay_tx, cx);
+                }
+                RunInput::Ended => return ControlFlow::Break(()),
+            }
+        }
+        ControlFlow::Continue(())
+    }
+
+    fn fail_run(&mut self, message: String, cx: &mut Context<Self>) {
+        if self.native_fork_pending() {
+            log::warn!(
+                "native fork failed, sending the conversation as context instead: {message}"
+            );
+            self.native_fork_failed = true;
+            self.run_ended(cx);
+            return;
+        }
+        self.run_failed = true;
+        self.transcript.mark_last_message_undelivered();
+        self.push_notice(message, true, cx);
+        self.run_ended(cx);
+    }
+
+    fn native_fork_pending(&self) -> bool {
+        self.native_fork_prompt.is_some() && self.metadata.native_session_id.is_none()
+    }
+
+    fn run_ended(&mut self, cx: &mut Context<Self>) {
+        self.run = None;
+        self.background_tasks.clear();
+        self.known_tasks.clear();
+        self.pending_questions.clear();
+        self.cancel_running_tools();
+        for subagent in self.subagents.values_mut() {
+            subagent.transcript.cancel_running_tools();
+            subagent.status.get_or_insert(DoneStatus::Interrupted);
+        }
+        self.save_entries_soon(cx);
+        if std::mem::take(&mut self.native_fork_failed)
+            && let Some(prompt) = self.native_fork_prompt.take()
+            && !self.deleted
+        {
+            self.native_fork_errors.clear();
+            self.metadata.fork_source = None;
+            self.save_metadata(cx);
+            self.working = true;
+            self.start_run(prompt, cx);
+            cx.notify();
+            return;
+        }
+        match self.prompt_after_stop.take() {
+            Some(prompt) if !self.deleted => {
+                self.working = true;
+                self.working_since = Some(Instant::now());
+                self.start_run(prompt, cx);
+            }
+            _ => {
+                self.working = false;
+                if !self.user_stopped {
+                    self.send_next_queued(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn send_next_queued(&mut self, cx: &mut Context<Self>) {
+        if self.working || self.deleted {
+            return;
+        }
+        if let Some(next) = self.take_next_queued() {
+            self.deliver(next.prompt, cx);
+        }
+    }
+
+    fn close_for_deletion(&mut self, cx: &mut Context<Self>) -> Vec<Task<()>> {
+        self.deleted = true;
+        self.run = None;
+        self.pending_entries_save = None;
+        self.prompt_after_stop = None;
+        self.pending_questions.clear();
+        self.working = false;
+        cx.notify();
+        vec![
+            std::mem::replace(&mut self.save_metadata_task, Task::ready(())),
+            std::mem::replace(&mut self.save_entries_task, Task::ready(())),
+        ]
+    }
+
+    fn push_question(
+        &mut self,
+        questions: Vec<UserInputQuestion>,
+        responder: tokio::sync::oneshot::Sender<Vec<UserInputAnswer>>,
+        cx: &mut Context<Self>,
+    ) {
+        if questions.is_empty() {
+            if responder.send(Vec::new()).is_err() {
+                log::debug!("agent stopped waiting for an answer");
+            }
+            return;
+        }
+        let pending = PendingQuestion {
+            questions,
+            responder: Some(responder),
+        };
+        // The harness may have asked just before the switch to a mode that skips prompts.
+        let approve = pending.is_tool_permission() && self.skips_prompts();
+        let id = pending.id().to_string();
+        self.pending_questions.push(pending);
+        if approve {
+            self.answer_permission(&id, true, cx);
+            return;
+        }
+        cx.emit(SessionEvent::NeedsInput);
+        cx.notify();
+    }
+
+    fn apply_event(&mut self, event: AgentEvent, cx: &mut Context<Self>) {
+        self.active_at = Instant::now();
+        match event {
+            AgentEvent::SessionStarted { session_id, .. } => {
+                if !session_id.is_empty() {
+                    self.set_native_session_id(session_id, cx);
+                }
+            }
+            AgentEvent::PermissionModeReported { mode } => {
+                let asked_for_auto = self.metadata.kind == AgentKind::Claude
+                    && self.metadata.settings.permission == PermissionMode::Auto;
+                if asked_for_auto && mode != "auto" && !self.noticed_auto_unavailable {
+                    self.noticed_auto_unavailable = true;
+                    self.push_notice(
+                        n!(
+                            "Auto mode isn't available here, so Claude will ask before acting. It's off with fast mode, and on some plans and models."
+                        )
+                        .into(),
+                        false,
+                        cx,
+                    );
+                }
+            }
+            AgentEvent::TextDelta { text } => {
+                self.resume_working();
+                self.append_text(&text, false, cx)
+            }
+            AgentEvent::ReasoningDelta { text } => {
+                self.resume_working();
+                self.append_text(&text, true, cx)
+            }
+            AgentEvent::AssistantMessageCompleted { .. } => self.transcript.text_block_open = false,
+            AgentEvent::Steered { .. } => {
+                self.transcript.text_block_open = false;
+                self.resume_working();
+            }
+            AgentEvent::ToolCall { id, call } => {
+                self.resume_working();
+                if call.is_subagent_spawn() {
+                    self.subagents.entry(id.clone()).or_insert_with(Subagent::new);
+                }
+                self.transcript.start_tool(id, call);
+                self.save_entries(cx);
+            }
+            AgentEvent::ToolResult {
+                id,
+                is_error,
+                output,
+                diff,
+            } => {
+                self.transcript.finish_tool(&id, is_error, output, diff);
+                self.save_entries(cx);
+            }
+            AgentEvent::Error { message } if self.native_fork_pending() => {
+                self.native_fork_errors.push(message);
+            }
+            AgentEvent::Error { message } => self.push_notice(message, true, cx),
+            AgentEvent::Done {
+                status: DoneStatus::Errored,
+                error,
+                ..
+            } if self.native_fork_pending() => {
+                log::warn!(
+                    "native fork failed, sending the conversation as context instead: {error:?} {:?}",
+                    self.native_fork_errors
+                );
+                self.native_fork_failed = true;
+            }
+            AgentEvent::Done {
+                status,
+                error,
+                session_id,
+                ..
+            } => {
+                if let Some(session_id) = session_id.filter(|id| !id.is_empty()) {
+                    self.set_native_session_id(session_id, cx);
+                }
+                self.working = self.prompt_after_stop.is_some();
+                self.compacting = false;
+                self.transcript.text_block_open = false;
+                self.cancel_running_tools();
+                match status {
+                    DoneStatus::Completed => {
+                        self.metadata.outcome = Some(ChatOutcome::Completed);
+                        self.metadata.unseen = true;
+                        cx.emit(SessionEvent::Finished { errored: false });
+                    }
+                    DoneStatus::Interrupted => {
+                        if self.user_stopped && self.turn_prompts == 1 {
+                            self.editable_prompt = self.turn_prompt_id.clone();
+                        }
+                    }
+                    DoneStatus::Errored => {
+                        self.run_failed = true;
+                        self.metadata.outcome = Some(ChatOutcome::Errored);
+                        self.metadata.unseen = true;
+                        cx.emit(SessionEvent::Finished { errored: true });
+                        self.push_notice(
+                            error.unwrap_or_else(|| n!("The agent stopped with an error.").into()),
+                            true,
+                            cx,
+                        )
+                    }
+                }
+                self.touch(cx);
+                let stopped_in_place = self.run.as_mut().is_some_and(ActiveRun::settle_stop);
+                if stopped_in_place {
+                    self.turn_stopped_in_place(status, cx);
+                } else if status != DoneStatus::Interrupted {
+                    self.send_next_queued(cx);
+                }
+            }
+            AgentEvent::PromptRecorded { id } => {
+                self.turn_prompt_id.get_or_insert(id);
+            }
+            AgentEvent::TitleChanged { title } => self.adopt_agent_title(&title, cx),
+            AgentEvent::GeneratedImage { path, .. } => {
+                self.transcript.text_block_open = false;
+                self.transcript.entries.push(Entry::Image { path: path.into() });
+                self.save_entries(cx);
+            }
+            AgentEvent::Compacting { active } => {
+                if active {
+                    self.resume_working();
+                }
+                self.compacting = active;
+            }
+            AgentEvent::TaskStarted {
+                task_id,
+                tool_use_id,
+                kind,
+                description,
+            } => {
+                let started_at = self
+                    .known_tasks
+                    .get(&task_id)
+                    .or_else(|| {
+                        self.background_tasks
+                            .iter()
+                            .find(|task| task.task_id == task_id)
+                    })
+                    .map_or_else(Instant::now, |task| task.started_at);
+                if let Some(live) = self
+                    .background_tasks
+                    .iter_mut()
+                    .find(|task| task.task_id == task_id)
+                {
+                    if live.tool_use_id.is_none() {
+                        live.tool_use_id = tool_use_id.clone();
+                    }
+                    if live.description.trim().is_empty() {
+                        live.description = description.clone();
+                    }
+                }
+                self.known_tasks.insert(
+                    task_id.clone(),
+                    BackgroundTask {
+                        task_id,
+                        tool_use_id,
+                        kind,
+                        description,
+                        started_at,
+                    },
+                );
+            }
+            AgentEvent::TaskFinished { task_id, .. } => {
+                self.known_tasks.remove(&task_id);
+                self.background_tasks.retain(|task| task.task_id != task_id);
+            }
+            AgentEvent::BackgroundTasksChanged { tasks } => {
+                let previous = std::mem::take(&mut self.background_tasks);
+                self.background_tasks = tasks
+                    .into_iter()
+                    .map(|info| {
+                        let known = self
+                            .known_tasks
+                            .get(&info.task_id)
+                            .or_else(|| previous.iter().find(|task| task.task_id == info.task_id));
+                        BackgroundTask {
+                            tool_use_id: known.and_then(|task| task.tool_use_id.clone()),
+                            started_at: known.map_or_else(Instant::now, |task| task.started_at),
+                            description: if info.description.trim().is_empty() {
+                                known.map(|task| task.description.clone()).unwrap_or_default()
+                            } else {
+                                info.description
+                            },
+                            kind: info.kind,
+                            task_id: info.task_id,
+                        }
+                    })
+                    .collect();
+            }
+            AgentEvent::Compacted { tokens, manual } => {
+                self.compacting = false;
+                // After /compact the Claude process keeps the old history in memory; a resume loads the new one.
+                if manual && self.metadata.kind == AgentKind::Claude {
+                    self.restart_on_next_send = true;
+                }
+                let mut context = self.metadata.context.unwrap_or_default();
+                if context.tokens != tokens {
+                    context.tokens = tokens;
+                    self.metadata.context = Some(context);
+                    self.save_metadata(cx);
+                }
+                self.push_notice(n!("Context compacted.").into(), false, cx);
+            }
+            AgentEvent::ContextUsage { tokens, window } => {
+                let mut context = self.metadata.context.unwrap_or_default();
+                if tokens.is_some() {
+                    context.tokens = tokens;
+                }
+                if let Some(window) = window.filter(|window| *window > 0) {
+                    context.window = Some(window);
+                }
+                if self.metadata.context != Some(context) {
+                    self.metadata.context = Some(context);
+                    self.save_metadata(cx);
+                }
+            }
+            AgentEvent::AvailableCommands { commands } => {
+                cx.emit(SessionEvent::CommandsReported(commands));
+            }
+            AgentEvent::Usage { .. }
+            | AgentEvent::InputRequested { .. }
+            | AgentEvent::InputResolved { .. }
+            | AgentEvent::UserMessage { .. } => {}
+            AgentEvent::Subagent {
+                parent_tool_use_id,
+                event,
+            } => self.apply_subagent_event(parent_tool_use_id, *event, cx),
+        }
+        cx.notify();
+    }
+
+    /// The agent can start a turn on its own after a background command or subagent finishes.
+    fn resume_working(&mut self) {
+        if !self.working {
+            self.editable_prompt = None;
+            self.working = true;
+            self.working_since = Some(Instant::now());
+        }
+    }
+
+    fn apply_subagent_event(&mut self, parent: String, event: AgentEvent, cx: &mut Context<Self>) {
+        let languages = self.languages.clone();
+        let subagent = self.subagents.entry(parent).or_insert_with(Subagent::new);
+        let transcript = &mut subagent.transcript;
+        match event {
+            AgentEvent::UserMessage { text } => transcript.push_user(text, Vec::new(), Vec::new()),
+            AgentEvent::TextDelta { text } => transcript.append_text(&text, false, &languages, cx),
+            AgentEvent::ReasoningDelta { text } => {
+                transcript.append_text(&text, true, &languages, cx)
+            }
+            AgentEvent::AssistantMessageCompleted { .. } | AgentEvent::Steered { .. } => {
+                transcript.text_block_open = false
+            }
+            AgentEvent::ToolCall { id, call } => transcript.start_tool(id, call),
+            AgentEvent::ToolResult {
+                id,
+                is_error,
+                output,
+                diff,
+            } => transcript.finish_tool(&id, is_error, output, diff),
+            AgentEvent::Error { message } => transcript.push_notice(message, true),
+            AgentEvent::Done { status, error, .. } => {
+                transcript.cancel_running_tools();
+                transcript.text_block_open = false;
+                if let Some(error) = error.filter(|_| status == DoneStatus::Errored) {
+                    transcript.push_notice(error, true);
+                }
+                subagent.status = Some(status);
+            }
+            AgentEvent::Subagent {
+                parent_tool_use_id,
+                event,
+            } => return self.apply_subagent_event(parent_tool_use_id, *event, cx),
+            _ => return,
+        }
+        self.save_entries(cx);
+    }
+
+    fn load_external_history(
+        &mut self,
+        events: Vec<AgentEvent>,
+        source: String,
+        cx: &mut Context<Self>,
+    ) {
+        let languages = self.languages.clone();
+        for event in events {
+            let transcript = &mut self.transcript;
+            match event {
+                AgentEvent::UserMessage { text } => {
+                    transcript.push_user(text, Vec::new(), Vec::new())
+                }
+                AgentEvent::TextDelta { text } => {
+                    transcript.append_text(&text, false, &languages, cx)
+                }
+                AgentEvent::ReasoningDelta { text } => {
+                    transcript.append_text(&text, true, &languages, cx)
+                }
+                AgentEvent::AssistantMessageCompleted { .. } => transcript.text_block_open = false,
+                AgentEvent::ToolCall { id, call } => transcript.start_tool(id, call),
+                AgentEvent::ToolResult {
+                    id,
+                    is_error,
+                    output,
+                    diff,
+                } => transcript.finish_tool(&id, is_error, output, diff),
+                AgentEvent::Error { message } => transcript.push_notice(message, true),
+                AgentEvent::Subagent {
+                    parent_tool_use_id,
+                    event,
+                } => self.apply_subagent_event(parent_tool_use_id, *event, cx),
+                _ => {}
+            }
+        }
+        self.cancel_running_tools();
+        for subagent in self.subagents.values_mut() {
+            subagent.transcript.cancel_running_tools();
+            subagent.status.get_or_insert(DoneStatus::Completed);
+        }
+        self.metadata.fork_context = fork_context(&self.transcript.serialize(cx));
+        let notice = i18n::format(
+            SharedString::new_static(CONTINUED_NOTICE),
+            &[("source", &source)],
+        );
+        self.transcript.push_notice(notice.to_string(), false);
+        self.save_metadata(cx);
+        self.save_entries(cx);
+        cx.notify();
+    }
+
+    fn append_text(&mut self, text: &str, thinking: bool, cx: &mut Context<Self>) {
+        let languages = self.languages.clone();
+        self.transcript.append_text(text, thinking, &languages, cx);
+        self.save_entries(cx);
+    }
+
+    fn push_notice(&mut self, text: String, is_error: bool, cx: &mut Context<Self>) {
+        self.transcript.push_notice(text, is_error);
+        self.save_entries(cx);
+        cx.notify();
+    }
+
+    fn cancel_running_tools(&mut self) {
+        self.transcript.cancel_running_tools();
+    }
+
+    /// Replaces the title taken from the first message, but never one the user typed.
+    fn adopt_agent_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        let first_prompt = self
+            .transcript
+            .entries
+            .iter()
+            .find_map(|entry| match entry {
+                Entry::User { text, .. } => Some(text),
+                _ => None,
+            });
+        if !first_prompt.is_some_and(|text| self.metadata.title == title_from(text)) {
+            return;
+        }
+        let title = agent_title(title);
+        if title.is_empty() || title == self.metadata.title {
+            return;
+        }
+        self.metadata.title = title;
+        self.save_metadata(cx);
+    }
+
+    fn set_native_session_id(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if self.metadata.native_session_id.as_deref() != Some(session_id.as_str()) {
+            self.metadata.native_session_id = Some(session_id);
+            if self.native_fork_prompt.take().is_some() {
+                self.metadata.fork_source = None;
+                self.metadata.fork_context = None;
+                for message in std::mem::take(&mut self.native_fork_errors) {
+                    self.push_notice(message, true, cx);
+                }
+            }
+            self.save_metadata(cx);
+        }
+    }
+
+    fn touch(&mut self, cx: &mut Context<Self>) {
+        self.metadata.updated_at = now();
+        self.active_at = Instant::now();
+        self.save_metadata(cx);
+        self.save_entries_soon(cx);
+    }
+
+    fn encoded_transcript(&mut self, cx: &App) -> Result<EncodedTranscript> {
+        let mut subagents = self
+            .subagents
+            .iter_mut()
+            .map(|(id, subagent)| {
+                Ok(EncodedSubagent {
+                    id: id.clone(),
+                    entries: EncodedEntries(subagent.transcript.encode(cx)?),
+                    status: subagent.status,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        subagents.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(EncodedTranscript {
+            entries: EncodedEntries(self.transcript.encode(cx)?),
+            subagents,
+            queue: self
+                .queue
+                .iter()
+                .map(|queued| (&queued.prompt).into())
+                .collect(),
+        })
+    }
+
+    #[cfg(test)]
+    fn saved_transcript(&self, cx: &App) -> SavedTranscript {
+        let mut subagents: Vec<SavedSubagent> = self
+            .subagents
+            .iter()
+            .map(|(id, subagent)| SavedSubagent {
+                id: id.clone(),
+                entries: subagent.transcript.serialize(cx),
+                status: subagent.status,
+            })
+            .collect();
+        subagents.sort_by(|left, right| left.id.cmp(&right.id));
+        SavedTranscript::Current {
+            entries: self.transcript.serialize(cx),
+            subagents,
+            queue: self.queue.iter().map(|queued| (&queued.prompt).into()).collect(),
+        }
+    }
+
+    fn save_metadata(&mut self, cx: &mut Context<Self>) {
+        if self.deleted {
+            return;
+        }
+        cx.emit(SessionEvent::MetadataChanged);
+        let metadata = self.metadata.clone();
+        let directory = self.directory.clone();
+        let previous_save = std::mem::replace(&mut self.save_metadata_task, Task::ready(()));
+        let unfinished_write = self.unfinished_writes.clone();
+        self.save_metadata_task = cx.background_spawn(async move {
+            let _unfinished_write = unfinished_write;
+            previous_save.await;
+            let path = metadata_path(&directory, &metadata.id);
+            serde_json::to_vec_pretty(&metadata)
+                .map_err(anyhow::Error::from)
+                .and_then(|json| write_atomically(&path, &json))
+                .log_err();
+        });
+    }
+
+    fn save_entries(&mut self, cx: &mut Context<Self>) {
+        let delay = if self.working || self.run.is_some() {
+            SAVE_INTERVAL_WHILE_WORKING
+        } else {
+            SAVE_DEBOUNCE
+        };
+        self.schedule_entries_save(delay, cx);
+    }
+
+    fn save_entries_soon(&mut self, cx: &mut Context<Self>) {
+        self.schedule_entries_save(SAVE_DEBOUNCE, cx);
+    }
+
+    fn schedule_entries_save(&mut self, delay: Duration, cx: &mut Context<Self>) {
+        if self.deleted {
+            return;
+        }
+        let due = Instant::now() + delay;
+        if self
+            .pending_entries_save
+            .as_ref()
+            .is_some_and(|pending| pending.due <= due)
+        {
+            return;
+        }
+        let timer = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| this.write_entries(cx)).log_err();
+        });
+        self.pending_entries_save = Some(PendingSave { due, _timer: timer });
+    }
+
+    fn write_entries(&mut self, cx: &mut Context<Self>) {
+        if self.pending_entries_save.take().is_none() || self.deleted {
+            return;
+        }
+        let Some(transcript) = self
+            .encoded_transcript(cx)
+            .context("failed to encode the chat transcript")
+            .log_err()
+        else {
+            return;
+        };
+        #[cfg(test)]
+        assert_eq!(
+            serde_json::to_string(&transcript).ok(),
+            serde_json::to_string(&self.saved_transcript(cx)).ok(),
+            "an incremental save must write what a full one would"
+        );
+        let path = entries_path(&self.directory, &self.metadata.id);
+        let previous_write = std::mem::replace(&mut self.save_entries_task, Task::ready(()));
+        let unfinished_write = self.unfinished_writes.clone();
+        self.save_entries_task = cx.background_spawn(async move {
+            let _unfinished_write = unfinished_write;
+            previous_write.await;
+            serde_json::to_vec(&transcript)
+                .map_err(anyhow::Error::from)
+                .and_then(|json| write_atomically(&path, &json))
+                .log_err();
+        });
+    }
+
+    fn finish_saving(&mut self, cx: &mut Context<Self>) -> Vec<Task<()>> {
+        self.write_entries(cx);
+        vec![
+            std::mem::replace(&mut self.save_metadata_task, Task::ready(())),
+            std::mem::replace(&mut self.save_entries_task, Task::ready(())),
+        ]
+    }
+}
+
+#[derive(Clone)]
+pub struct SessionSummary {
+    pub id: String,
+    pub kind: AgentKind,
+    pub title: SharedString,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub working: bool,
+    pub needs_input: bool,
+    pub pinned: bool,
+    pub parent_id: Option<String>,
+    pub side_chat: bool,
+    pub outcome: Option<ChatOutcome>,
+    pub unseen: bool,
+    pub project_root: PathBuf,
+    pub branch: Option<String>,
+    pub native_session_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSort {
+    #[default]
+    Updated,
+    Created,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatListPrefs {
+    pub all_projects: bool,
+    pub group_by_project: bool,
+    pub sort: ChatSort,
+    pub compact_rows: bool,
+    pub collapsed_sections: Vec<String>,
+    pub favorite_models: Vec<String>,
+    pub dictation_device: Option<String>,
+    /// 1.1.11 kept saved messages here; they now live in their own file.
+    #[serde(rename = "saved_messages", skip_serializing)]
+    pub(crate) legacy_saved_messages: Vec<SavedMessage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedMessage {
+    pub chat_id: String,
+    /// Where the message was in its chat; checked against `text` because chats can drop messages.
+    pub entry: usize,
+    pub text: String,
+    pub from_agent: bool,
+    pub saved_at: i64,
+}
+
+impl ChatListPrefs {
+    pub fn favorite_key(kind: AgentKind, model_id: &str) -> String {
+        format!("{}:{model_id}", kind.label())
+    }
+
+    pub fn is_favorite(&self, kind: AgentKind, model_id: &str) -> bool {
+        self.favorite_models
+            .contains(&Self::favorite_key(kind, model_id))
+    }
+}
+
+pub enum StoreEvent {
+    SessionFinished { id: String, errored: bool },
+    SessionNeedsInput { id: String },
+}
+
+fn chat_list_path(directory: &Path) -> PathBuf {
+    directory.join("chat_list.json")
+}
+
+fn saved_messages_path(directory: &Path) -> PathBuf {
+    directory.join("saved_messages.json")
+}
+
+fn fork_title(parent_title: &str, sessions: &[SessionMetadata]) -> String {
+    if parent_title.is_empty() {
+        return String::new();
+    }
+    let base = parent_title
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+        .filter(|(_, number)| number.parse::<u32>().is_ok_and(|number| number >= 2))
+        .map_or(parent_title, |(base, _)| base);
+    (2..)
+        .map(|number| format!("{base} ({number})"))
+        .find(|title| !sessions.iter().any(|session| session.title == *title))
+        .unwrap_or_default()
+}
+
+fn fork_context(entries: &[SerializedEntry]) -> Option<String> {
+    let history: Vec<serde_json::Value> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            SerializedEntry::User { text, .. } => Some(("user", text.clone())),
+            SerializedEntry::Assistant { text, .. } => Some(("assistant", text.clone())),
+            SerializedEntry::Tool { call, output, .. } => Some((
+                "assistant",
+                format!(
+                    "Tool: {}\n{}",
+                    serde_json::to_string(call).unwrap_or_default(),
+                    output.clone().unwrap_or_default()
+                ),
+            )),
+            SerializedEntry::Thinking { .. }
+            | SerializedEntry::Notice { .. }
+            | SerializedEntry::Image { .. } => None,
+        })
+        .filter(|(_, text)| !text.trim().is_empty())
+        .map(|(role, text)| serde_json::json!({ "role": role, "text": text }))
+        .collect();
+    (!history.is_empty()).then(|| serde_json::Value::Array(history).to_string())
+}
+
+pub(crate) struct ShellEnvLoaded(
+    pub futures::future::Shared<futures::channel::oneshot::Receiver<()>>,
+);
+
+impl Global for ShellEnvLoaded {}
+
+pub(crate) fn shell_env_loaded(cx: &App) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let loaded = cx.try_global::<ShellEnvLoaded>().map(|loaded| loaded.0.clone());
+    async move {
+        if let Some(loaded) = loaded {
+            loaded.await.ok();
+        }
+    }
+}
+
+/// Agent CLIs and their config folders come from the login shell's environment, which loads after startup.
+fn spawn_agent_work<T: 'static, F, R>(
+    cx: &Context<T>,
+    work: F,
+) -> Task<std::result::Result<R, gpui_tokio::JoinError>>
+where
+    F: std::future::Future<Output = R> + Send + 'static,
+    R: Send + 'static,
+{
+    let env_loaded = shell_env_loaded(cx);
+    gpui_tokio::Tokio::spawn(cx, async move {
+        env_loaded.await;
+        work.await
+    })
+}
+
+fn shell_env_is_loaded(cx: &App) -> bool {
+    cx.try_global::<ShellEnvLoaded>()
+        .is_none_or(|loaded| loaded.0.peek().is_some())
+}
+
+struct GlobalAgentStore(Entity<AgentStore>);
+
+impl Global for GlobalAgentStore {}
+
+impl EventEmitter<StoreEvent> for AgentStore {}
+
+/// Keeps chats with an agent or unsaved changes alive, so an agent keeps running after its tab is closed.
+pub struct AgentStore {
+    directory: Arc<Path>,
+    sessions: Vec<SessionMetadata>,
+    live: HashMap<String, Entity<AgentSession>>,
+    released: HashMap<String, WeakEntity<AgentSession>>,
+    idle_watch: Option<Task<()>>,
+    languages: Arc<LanguageRegistry>,
+    harnesses: HashMap<AgentKind, Arc<dyn Harness>>,
+    catalogs: HashMap<AgentKind, ModelCatalog>,
+    unlisted_models: HashMap<AgentKind, Vec<String>>,
+    defaults: HashMap<AgentKind, RunSettings>,
+    plan_usage: HashMap<AgentKind, PlanUsageState>,
+    commands: HashMap<(AgentKind, PathBuf), CommandCatalog>,
+    skills: HashMap<(AgentKind, PathBuf), SkillCatalog>,
+    accounts: HashMap<AgentKind, AccountsState>,
+    list_prefs: ChatListPrefs,
+    save_list_prefs_task: Task<()>,
+    saved_messages: Vec<SavedMessage>,
+    save_saved_messages_task: Task<()>,
+    metadata_writes: HashMap<String, Task<()>>,
+    save_defaults_task: Task<()>,
+    load_task: Option<Shared<Task<()>>>,
+    agent_updates: HashMap<AgentKind, AgentUpdate>,
+    idle_sleep_guard: Option<Task<()>>,
+}
+
+#[derive(Clone)]
+pub enum AgentUpdateStatus {
+    Updating,
+    Finished(SharedString),
+    Failed {
+        message: SharedString,
+        reason: SharedString,
+    },
+}
+
+struct AgentUpdate {
+    status: Option<AgentUpdateStatus>,
+    checked_at: Instant,
+    _task: Task<()>,
+}
+
+#[derive(Default)]
+struct ModelCatalog {
+    models: Vec<Model>,
+    fallback: Vec<Model>,
+    loaded: bool,
+    _task: Option<Task<()>>,
+}
+
+#[derive(Default)]
+pub struct AccountsState {
+    pub accounts: Vec<agent_harness::accounts::Account>,
+    pub usage: HashMap<String, std::result::Result<PlanUsage, String>>,
+    pub error: Option<SharedString>,
+    pub loading: bool,
+    pub switching: Option<String>,
+    _listing: Option<Task<()>>,
+    _activation: Option<Task<()>>,
+}
+
+fn accounts_dir() -> PathBuf {
+    paths::data_dir().clone()
+}
+
+#[derive(Default)]
+pub struct SkillCatalog {
+    pub skills: Vec<agent_harness::Skill>,
+    pub loaded: bool,
+    fetched_at: Option<Instant>,
+    _task: Option<Task<()>>,
+}
+
+#[derive(Default)]
+pub struct CommandCatalog {
+    pub commands: Vec<SlashCommand>,
+    pub loaded: bool,
+    pub error: Option<SharedString>,
+    fetched_at: Option<Instant>,
+    _task: Option<Task<()>>,
+}
+
+impl CommandCatalog {
+    pub fn is_loading(&self) -> bool {
+        self._task.is_some()
+    }
+}
+
+#[derive(Default)]
+pub struct PlanUsageState {
+    pub usage: Option<PlanUsage>,
+    pub error: Option<SharedString>,
+    pub loading: bool,
+    fetched_at: Option<Instant>,
+    _task: Option<Task<()>>,
+}
+
+fn defaults_path(directory: &Path) -> PathBuf {
+    directory.join("defaults.json")
+}
+
+const AGENT_UPDATE_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
+const AGENT_UPDATE_STATUS_SHOWN_FOR: Duration = Duration::from_secs(10);
+
+fn agent_updates_path(directory: &Path) -> PathBuf {
+    directory.join("agent_updates.json")
+}
+
+/// Recorded before updating, so an update that never finishes isn't retried on every new chat.
+fn claim_update_attempt(path: &Path, kind: AgentKind) -> bool {
+    static ATTEMPTS_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _locked = ATTEMPTS_FILE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let mut attempts: HashMap<AgentKind, u64> = std::fs::read(path)
+        .ok()
+        .and_then(|json| serde_json::from_slice(&json).log_err())
+        .unwrap_or_default();
+    if attempts
+        .get(&kind)
+        .is_some_and(|last| now.saturating_sub(*last) < AGENT_UPDATE_INTERVAL.as_secs())
+    {
+        return false;
+    }
+    attempts.insert(kind, now);
+    let saved = serde_json::to_vec(&attempts)
+        .map_err(anyhow::Error::from)
+        .and_then(|json| {
+            if let Some(directory) = path.parent() {
+                std::fs::create_dir_all(directory)?;
+            }
+            Ok(std::fs::write(path, json)?)
+        });
+    if let Err(error) = saved {
+        log::warn!("couldn't record the agent update attempt: {error}");
+    }
+    true
+}
+
+/// The effort to switch to when the model doesn't offer the chat's, so what's sent matches the picker.
+pub(crate) fn reasoning_for_model(
+    settings: &RunSettings,
+    models: &[Model],
+) -> Option<Option<ReasoningLevel>> {
+    let level = settings.reasoning?;
+    let model = agent_harness::view::selected_catalog_model(models, settings.model.as_deref())?;
+    if model.reasoning_levels.contains(&level) {
+        return None;
+    }
+    Some(agent_harness::view::clamp_reasoning(
+        Some(level),
+        &model.reasoning_levels,
+    ))
+}
+
+pub(crate) fn working_agent_count(cx: &App) -> usize {
+    cx.try_global::<GlobalAgentStore>()
+        .map_or(0, |store| store.0.read(cx).working_count(cx))
+}
+
+pub(crate) fn load_saved_chats(cx: &mut App) {
+    if let Some(store) = cx
+        .try_global::<GlobalAgentStore>()
+        .map(|store| store.0.clone())
+    {
+        store.update(cx, |store, cx| store.load_saved_chats(cx));
+    }
+}
+
+pub(crate) fn stop_all_agents(cx: &mut App) {
+    let Some(store) = cx
+        .try_global::<GlobalAgentStore>()
+        .map(|store| store.0.clone())
+    else {
+        return;
+    };
+    let sessions: Vec<Entity<AgentSession>> = store.read(cx).live.values().cloned().collect();
+    for session in sessions {
+        session.update(cx, |session, cx| {
+            if session.is_working() {
+                session.stop(cx);
+            }
+        });
+    }
+}
+
+fn announce_activity_changes(store: &Entity<AgentStore>, cx: &mut App) {
+    let Some(changes) = workspace::agent_activity_changes(cx) else {
+        return;
+    };
+    let mut last_seen = Vec::new();
+    cx.observe(store, move |store, cx| {
+        let activities = store.read(cx).agent_activities(cx);
+        if activities != last_seen {
+            last_seen = activities;
+            changes.update(cx, |_, cx| cx.notify());
+        }
+    })
+    .detach();
+}
+
+pub(crate) fn project_agent_activity(
+    roots: &[PathBuf],
+    cx: &App,
+) -> Option<workspace::AgentActivity> {
+    cx.try_global::<GlobalAgentStore>()?
+        .0
+        .read(cx)
+        .agent_activity_in(roots, cx)
+}
+
+pub(crate) fn quit_warning(cx: &App) -> Option<String> {
+    let settings = AgentChatSettings::get_global(cx);
+    if !settings.enabled || !settings.confirm_quit_while_working {
+        return None;
+    }
+    match working_agent_count(cx) {
+        0 => None,
+        1 => Some(t!("An agent is still working.").to_string()),
+        count => Some(t!("{count} agents are still working.", count = count).to_string()),
+    }
+}
+
+impl AgentStore {
+    fn agent_activity_in(&self, roots: &[PathBuf], cx: &App) -> Option<workspace::AgentActivity> {
+        self.live
+            .values()
+            .map(|session| session.read(cx))
+            .filter(|session| session.metadata.is_in(roots))
+            .filter_map(|session| session.agent_activity())
+            .max_by_key(|activity| *activity == workspace::AgentActivity::NeedsInput)
+    }
+
+    fn agent_activities(&self, cx: &App) -> Vec<(String, workspace::AgentActivity)> {
+        let mut activities: Vec<_> = self
+            .live
+            .iter()
+            .filter_map(|(id, session)| Some((id.clone(), session.read(cx).agent_activity()?)))
+            .collect();
+        activities.sort_by(|a, b| a.0.cmp(&b.0));
+        activities
+    }
+
+    fn working_count(&self, cx: &App) -> usize {
+        self.live
+            .values()
+            .filter(|session| {
+                let session = session.read(cx);
+                session.is_working() && !session.is_deleted()
+            })
+            .count()
+    }
+
+    pub fn global(languages: Arc<LanguageRegistry>, cx: &mut App) -> Entity<Self> {
+        if let Some(store) = cx.try_global::<GlobalAgentStore>() {
+            return store.0.clone();
+        }
+        let directory = paths::data_dir().join("agent_sessions");
+        let store = cx.new(|cx| Self::new(directory.into(), languages, cx));
+        cx.set_global(GlobalAgentStore(store.clone()));
+        crate::notifications::watch(&store, cx);
+        announce_activity_changes(&store, cx);
+        store
+    }
+
+    fn new(directory: Arc<Path>, languages: Arc<LanguageRegistry>, cx: &mut Context<Self>) -> Self {
+        let mut store = Self {
+            directory,
+            sessions: Vec::new(),
+            live: HashMap::default(),
+            released: HashMap::default(),
+            idle_watch: None,
+            languages,
+            harnesses: HashMap::default(),
+            catalogs: HashMap::default(),
+            unlisted_models: HashMap::default(),
+            defaults: HashMap::default(),
+            plan_usage: HashMap::default(),
+            commands: HashMap::default(),
+            skills: HashMap::default(),
+            accounts: HashMap::default(),
+            list_prefs: ChatListPrefs::default(),
+            save_list_prefs_task: Task::ready(()),
+            saved_messages: Vec::new(),
+            save_saved_messages_task: Task::ready(()),
+            metadata_writes: HashMap::default(),
+            save_defaults_task: Task::ready(()),
+            load_task: None,
+            agent_updates: HashMap::default(),
+            idle_sleep_guard: None,
+        };
+        cx.observe_self(|store, cx| store.update_idle_sleep_guard(cx)).detach();
+        cx.on_app_quit(|store, cx| {
+            for harness in store.harnesses.values() {
+                harness.app_quitting();
+            }
+            store.finish_saving(cx)
+        })
+        .detach();
+        cx.observe_global::<settings::SettingsStore>(|store, cx| {
+            store.update_idle_sleep_guard(cx)
+        })
+        .detach();
+        if AgentChatSettings::get_global(cx).enabled {
+            store.load_saved_chats(cx);
+        }
+        store
+    }
+
+    fn loaded_session(&self, id: &str) -> Option<Entity<AgentSession>> {
+        self.live
+            .get(id)
+            .cloned()
+            .or_else(|| self.released.get(id)?.upgrade())
+    }
+
+    fn finish_saving(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        let sessions: Vec<Entity<AgentSession>> = self
+            .live
+            .values()
+            .cloned()
+            .chain(self.released.values().filter_map(WeakEntity::upgrade))
+            .collect();
+        let writes: Vec<Task<()>> = sessions
+            .into_iter()
+            .flat_map(|session| session.update(cx, |session, cx| session.finish_saving(cx)))
+            .collect();
+        cx.background_spawn(async move {
+            futures::future::join_all(writes).await;
+        })
+    }
+
+    fn keep_loaded_while_needed(&mut self, session: &Entity<AgentSession>, cx: &mut Context<Self>) {
+        let state = session.read(cx);
+        if state.deleted {
+            return;
+        }
+        let (working, must_stay_loaded) = (state.working, state.must_stay_loaded());
+        if self.live.contains_key(&state.metadata.id) {
+            if !working {
+                self.watch_idle_sessions(cx);
+            }
+        } else if must_stay_loaded {
+            let id = state.metadata.id.clone();
+            self.released.remove(&id);
+            self.live.insert(id, session.clone());
+            self.watch_idle_sessions(cx);
+        }
+    }
+
+    fn watch_idle_sessions(&mut self, cx: &mut Context<Self>) {
+        if self.idle_watch.is_some() {
+            return;
+        }
+        self.idle_watch = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let next_check = this.update(cx, |this, cx| {
+                    let next_check = this.release_idle_sessions(IDLE_SESSION_TIMEOUT, cx);
+                    if next_check.is_none() {
+                        this.idle_watch = None;
+                    }
+                    next_check
+                });
+                let Ok(Some(wait)) = next_check else {
+                    return;
+                };
+                cx.background_executor().timer(wait).await;
+            }
+        }));
+    }
+
+    fn release_idle_sessions(
+        &mut self,
+        idle_for: Duration,
+        cx: &mut Context<Self>,
+    ) -> Option<Duration> {
+        self.released
+            .retain(|_, session| session.upgrade().is_some());
+        let sessions: Vec<Entity<AgentSession>> = self.live.values().cloned().collect();
+        let mut next_check: Option<Duration> = None;
+        for session in sessions {
+            match session.update(cx, |session, cx| session.release_when_idle(idle_for, cx)) {
+                IdleCheck::Busy => {}
+                IdleCheck::Wait(wait) => {
+                    next_check = Some(next_check.map_or(wait, |known| known.min(wait)));
+                }
+                IdleCheck::Unneeded => {
+                    let id = session.read(cx).metadata.id.clone();
+                    self.live.remove(&id);
+                    self.released.insert(id, session.downgrade());
+                }
+            }
+        }
+        next_check
+    }
+
+    fn has_agent_working_unattended(&self, cx: &App) -> bool {
+        self.live.values().any(|session| {
+            session.read(cx).agent_activity() == Some(workspace::AgentActivity::Working)
+        })
+    }
+
+    fn update_idle_sleep_guard(&mut self, cx: &mut Context<Self>) {
+        let keep_awake = AgentChatSettings::get_global(cx).prevent_idle_sleep
+            && self.has_agent_working_unattended(cx);
+        if keep_awake == self.idle_sleep_guard.is_some() {
+            return;
+        }
+        self.idle_sleep_guard = keep_awake.then(|| {
+            let guard = cx.prevent_idle_sleep(&t!("An agent is working"));
+            cx.spawn(async move |_, _| match guard.await {
+                Ok(_guard) => futures::future::pending::<()>().await,
+                Err(error) => log::warn!("Failed to keep the computer awake: {error:#}"),
+            })
+        });
+    }
+
+    fn load_saved_chats(&mut self, cx: &mut Context<Self>) {
+        if self.load_task.is_some() {
+            return;
+        }
+        let load = cx.spawn({
+            let directory = self.directory.clone();
+            async move |this, cx| {
+                let defaults_file = defaults_path(&directory);
+                let list_file = chat_list_path(&directory);
+                let saved_file = saved_messages_path(&directory);
+                let (sessions, defaults, list_prefs, saved_messages) = cx
+                    .background_spawn(async move {
+                        let defaults = std::fs::read(&defaults_file).ok().and_then(|json| {
+                            serde_json::from_slice::<HashMap<AgentKind, RunSettings>>(&json)
+                                .log_err()
+                        });
+                        let list_prefs = std::fs::read(&list_file).ok().and_then(|json| {
+                            serde_json::from_slice::<ChatListPrefs>(&json).log_err()
+                        });
+                        let saved_messages = std::fs::read(&saved_file).ok().and_then(|json| {
+                            serde_json::from_slice::<Vec<SavedMessage>>(&json).log_err()
+                        });
+                        (
+                            load_all_metadata(&directory),
+                            defaults,
+                            list_prefs,
+                            saved_messages,
+                        )
+                    })
+                    .await;
+                let sessions = sessions.log_err().unwrap_or_default();
+                this.update(cx, |this, cx| {
+                    if let Some(defaults) = defaults {
+                        this.defaults = defaults;
+                    }
+                    if let Some(mut list_prefs) = list_prefs {
+                        let legacy = std::mem::take(&mut list_prefs.legacy_saved_messages);
+                        this.list_prefs = list_prefs;
+                        if saved_messages.is_none() && !legacy.is_empty() {
+                            this.update_saved_messages(|saved| *saved = legacy, cx);
+                            this.update_list_prefs(|_| {}, cx);
+                        }
+                    }
+                    if let Some(saved_messages) = saved_messages {
+                        this.saved_messages = saved_messages;
+                    }
+                    for metadata in sessions {
+                        if !this.sessions.iter().any(|known| known.id == metadata.id) {
+                            this.sessions.push(metadata);
+                        }
+                    }
+                    this.sort();
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+        self.load_task = Some(load.shared());
+    }
+
+    /// Waits for the saved chat list, which may still be loading at startup.
+    pub fn open_saved_session(
+        &mut self,
+        id: SharedString,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
+        let loaded = self.load_task.clone();
+        cx.spawn(async move |this, cx| {
+            if let Some(loaded) = loaded {
+                loaded.await;
+            }
+            this.update(cx, |this, cx| this.open_session(&id, cx))?
+                .await
+        })
+    }
+
+    pub(crate) fn harness(&mut self, kind: AgentKind) -> Arc<dyn Harness> {
+        self.harnesses
+            .entry(kind)
+            .or_insert_with(|| kind.new_harness())
+            .clone()
+    }
+
+    pub fn languages(&self) -> &Arc<LanguageRegistry> {
+        &self.languages
+    }
+
+    pub fn models(&self, kind: AgentKind) -> &[Model] {
+        match self.catalogs.get(&kind) {
+            Some(catalog) if !catalog.models.is_empty() => &catalog.models,
+            Some(catalog) => &catalog.fallback,
+            None => &[],
+        }
+    }
+
+    /// The catalog plus models chats used that it doesn't list, so a switch away can be undone.
+    pub fn picker_models(&self, kind: AgentKind, selected: Option<&str>) -> Vec<Model> {
+        let mut models = self.models(kind).to_vec();
+        let remembered = self.unlisted_models.get(&kind).into_iter().flatten();
+        for id in selected.into_iter().chain(remembered.map(String::as_str)) {
+            if agent_harness::view::selected_catalog_model(&models, Some(id)).is_none() {
+                models.push(Model {
+                    id: id.to_owned(),
+                    label: id.to_owned(),
+                    description: None,
+                    reasoning_levels: Vec::new(),
+                    options: Vec::new(),
+                });
+            }
+        }
+        models
+    }
+
+    pub fn remember_unlisted_model(&mut self, kind: AgentKind, id: &str) {
+        if agent_harness::view::selected_catalog_model(self.models(kind), Some(id)).is_some() {
+            return;
+        }
+        let remembered = self.unlisted_models.entry(kind).or_default();
+        if !remembered.iter().any(|remembered| remembered == id) {
+            remembered.push(id.to_owned());
+        }
+    }
+
+    pub(crate) fn discovered_models(&self, kind: AgentKind) -> Option<&[Model]> {
+        self.catalogs
+            .get(&kind)
+            .filter(|catalog| catalog.loaded)
+            .map(|catalog| catalog.models.as_slice())
+    }
+
+    pub fn ensure_models(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        let harness = self.harness(kind);
+        let env_loaded = shell_env_is_loaded(cx);
+        let catalog = self.catalogs.entry(kind).or_default();
+        if catalog.fallback.is_empty() && env_loaded {
+            catalog.fallback = harness.fallback_models();
+        }
+        if catalog.loaded || catalog._task.is_some() {
+            return;
+        }
+        let discovery = spawn_agent_work(cx, async move { harness.models().await });
+        let task = cx.spawn(async move |this, cx| {
+            let models = match discovery.await {
+                Ok(Ok(models)) => {
+                    log::info!(
+                        "{} model discovery found {} models, starting with {:?}",
+                        kind.label(),
+                        models.len(),
+                        models.first().map(|model| &model.id)
+                    );
+                    models
+                }
+                Ok(Err(error)) => {
+                    log::info!("{} model discovery failed: {error}", kind.label());
+                    Vec::new()
+                }
+                Err(error) => {
+                    log::error!("{} model discovery stopped: {error}", kind.label());
+                    Vec::new()
+                }
+            };
+            this.update(cx, |this, cx| {
+                let fallback = this.harness(kind).fallback_models();
+                let catalog = this.catalogs.entry(kind).or_default();
+                catalog.fallback = fallback;
+                catalog.loaded = !models.is_empty();
+                catalog.models = models;
+                catalog._task = None;
+                cx.notify();
+            })
+            .log_err();
+        });
+        if let Some(catalog) = self.catalogs.get_mut(&kind) {
+            catalog._task = Some(task);
+        }
+    }
+
+    pub fn skills(&self, kind: AgentKind, cwd: &Path) -> Option<&SkillCatalog> {
+        self.skills.get(&(kind, cwd.to_path_buf()))
+    }
+
+    pub fn refresh_skills(&mut self, kind: AgentKind, cwd: PathBuf, cx: &mut Context<Self>) {
+        let key = (kind, cwd.clone());
+        if self.skills.get(&key).is_some_and(|catalog| {
+            catalog._task.is_some()
+                || catalog
+                    .fetched_at
+                    .is_some_and(|fetched_at| fetched_at.elapsed() < CATALOG_REFRESH_INTERVAL)
+        }) {
+            return;
+        }
+        let harness = self.harness(kind);
+        let discovery = spawn_agent_work(cx, async move { harness.skills(&cwd).await });
+        let task = cx.spawn({
+            let key = key.clone();
+            async move |this, cx| {
+                let skills = match discovery.await {
+                    Ok(Ok(skills)) => skills,
+                    Ok(Err(error)) => {
+                        log::info!("{} skill discovery failed: {error}", kind.label());
+                        Vec::new()
+                    }
+                    Err(error) => {
+                        log::error!("{} skill discovery stopped: {error}", kind.label());
+                        Vec::new()
+                    }
+                };
+                this.update(cx, |this, cx| {
+                    let catalog = this.skills.entry(key).or_default();
+                    catalog._task = None;
+                    catalog.loaded = true;
+                    catalog.fetched_at = Some(Instant::now());
+                    catalog.skills = skills;
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+        self.skills.entry(key).or_default()._task = Some(task);
+    }
+
+    pub fn commands(&self, kind: AgentKind, cwd: &Path) -> Option<&CommandCatalog> {
+        self.commands.get(&(kind, cwd.to_path_buf()))
+    }
+
+    pub fn refresh_commands(&mut self, kind: AgentKind, cwd: PathBuf, cx: &mut Context<Self>) {
+        let key = (kind, cwd.clone());
+        if self.commands.get(&key).is_some_and(|catalog| {
+            catalog.is_loading()
+                || catalog
+                    .fetched_at
+                    .is_some_and(|fetched_at| fetched_at.elapsed() < CATALOG_REFRESH_INTERVAL)
+        }) {
+            return;
+        }
+        let harness = self.harness(kind);
+        let discovery = spawn_agent_work(cx, async move { harness.commands(&cwd).await });
+        let task = cx.spawn({
+            let key = key.clone();
+            async move |this, cx| {
+                let result = match discovery.await {
+                    Ok(result) => result.map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                this.update(cx, |this, cx| {
+                    let catalog = this.commands.entry(key).or_default();
+                    catalog._task = None;
+                    catalog.loaded = true;
+                    catalog.fetched_at = Some(Instant::now());
+                    match result {
+                        Ok(commands) => {
+                            catalog.commands = commands;
+                            catalog.error = None;
+                        }
+                        Err(error) => {
+                            log::info!("{} command discovery failed: {error}", kind.label());
+                            catalog.error = Some(error.into());
+                        }
+                    }
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+        self.commands.entry(key).or_default()._task = Some(task);
+        cx.notify();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn skip_plan_usage(&mut self) {
+        for kind in AgentKind::ALL {
+            self.plan_usage.entry(kind).or_default().loading = true;
+        }
+    }
+
+    pub fn accounts(&self, kind: AgentKind) -> Option<&AccountsState> {
+        self.accounts.get(&kind)
+    }
+
+    pub fn refresh_accounts(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        if !kind.has_plan_usage() {
+            return;
+        }
+        let state = self.accounts.entry(kind).or_default();
+        if state.loading {
+            return;
+        }
+        state.loading = true;
+        let harness_id = kind.harness_id();
+        let listing = spawn_agent_work(cx, async move {
+            agent_harness::accounts::list(harness_id, &accounts_dir()).await
+        });
+        let http = cx.http_client();
+        let task = cx.spawn(async move |this, cx| {
+            let accounts = match listing.await {
+                Ok(result) => result,
+                Err(error) => Err(error.to_string()),
+            };
+            let others: Vec<String> = accounts
+                .as_ref()
+                .map(|accounts| {
+                    accounts
+                        .iter()
+                        .filter(|account| !account.active)
+                        .map(|account| account.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                let state = this.accounts.entry(kind).or_default();
+                state.loading = false;
+                match accounts {
+                    Ok(accounts) => {
+                        state.accounts = accounts;
+                        state.error = None;
+                    }
+                    Err(error) => state.error = Some(error.into()),
+                }
+                cx.notify();
+            })
+            .log_err();
+            for account_id in others {
+                let request = {
+                    let account_id = account_id.clone();
+                    let Ok(request) = this.update(cx, |_, cx| {
+                        spawn_agent_work(cx, async move {
+                            agent_harness::accounts::usage_request(
+                                harness_id,
+                                &account_id,
+                                &accounts_dir(),
+                            )
+                            .await
+                        })
+                    }) else {
+                        return;
+                    };
+                    request
+                };
+                let usage = fetch_plan_usage(harness_id, request, http.clone()).await;
+                this.update(cx, |this, cx| {
+                    this.accounts
+                        .entry(kind)
+                        .or_default()
+                        .usage
+                        .insert(account_id, usage);
+                    cx.notify();
+                })
+                .log_err();
+            }
+        });
+        if let Some(state) = self.accounts.get_mut(&kind) {
+            state._listing = Some(task);
+        }
+        cx.notify();
+    }
+
+    pub fn activate_account(&mut self, kind: AgentKind, account_id: String, cx: &mut Context<Self>) {
+        let state = self.accounts.entry(kind).or_default();
+        if state.switching.is_some() {
+            return;
+        }
+        state.switching = Some(account_id.clone());
+        let harness_id = kind.harness_id();
+        let activation = spawn_agent_work(cx, async move {
+            agent_harness::accounts::activate(harness_id, &account_id, &accounts_dir()).await
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let result = match activation.await {
+                Ok(result) => result,
+                Err(error) => Err(error.to_string()),
+            };
+            this.update(cx, |this, cx| {
+                let state = this.accounts.entry(kind).or_default();
+                state.switching = None;
+                if let Err(error) = result {
+                    state.error = Some(error.into());
+                }
+                if let Some(usage) = this.plan_usage.get_mut(&kind) {
+                    usage.fetched_at = None;
+                }
+                if let Some(catalog) = this.catalogs.get_mut(&kind) {
+                    catalog.loaded = false;
+                }
+                this.refresh_plan_usage(kind, true, cx);
+                this.ensure_models(kind, cx);
+                this.refresh_accounts(kind, cx);
+            })
+            .log_err();
+        });
+        if let Some(state) = self.accounts.get_mut(&kind) {
+            state._activation = Some(task);
+        }
+        cx.notify();
+    }
+
+    pub fn agent_update(&self, kind: AgentKind) -> Option<&AgentUpdateStatus> {
+        self.agent_updates.get(&kind)?.status.as_ref()
+    }
+
+    pub fn update_agent_if_due(&mut self, kind: AgentKind, cx: &mut Context<Self>) {
+        if self
+            .agent_updates
+            .get(&kind)
+            .is_some_and(|update| update.checked_at.elapsed() < AGENT_UPDATE_INTERVAL)
+        {
+            return;
+        }
+        let harness = self.harness(kind);
+        let attempts = agent_updates_path(&self.directory);
+        let claim = spawn_agent_work(cx, {
+            let harness = harness.clone();
+            async move {
+                let args = harness.update_args();
+                let executable = harness.executable_path().filter(|_| !args.is_empty())?;
+                claim_update_attempt(&attempts, kind).then_some((executable, args))
+            }
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let Ok(Some((executable, args))) = claim.await else {
+                return;
+            };
+            let Some(run) = this
+                .update(cx, |this, cx| {
+                    this.set_agent_update(kind, Some(AgentUpdateStatus::Updating), cx);
+                    spawn_agent_work(
+                        cx,
+                        agent_harness::update::update_cli(executable, args, move || {
+                            harness.executable_path()
+                        }),
+                    )
+                })
+                .log_err()
+            else {
+                return;
+            };
+            let label = kind.label();
+            let failed = |reason: String| AgentUpdateStatus::Failed {
+                message: t!("Couldn't update {agent}", agent = label),
+                reason: reason.into(),
+            };
+            let status = match run.await {
+                Ok(Ok(agent_harness::update::UpdateOutcome::Updated(Some(version)))) => {
+                    AgentUpdateStatus::Finished(t!(
+                        "{agent} updated to {version}",
+                        agent = label,
+                        version = version
+                    ))
+                }
+                Ok(Ok(agent_harness::update::UpdateOutcome::Updated(None))) => {
+                    AgentUpdateStatus::Finished(t!("{agent} updated", agent = label))
+                }
+                Ok(Ok(agent_harness::update::UpdateOutcome::UpToDate)) => {
+                    AgentUpdateStatus::Finished(t!("{agent} is up to date", agent = label))
+                }
+                Ok(Err(error)) => failed(error.0),
+                Err(error) => failed(error.to_string()),
+            };
+            this.update(cx, |this, cx| this.set_agent_update(kind, Some(status), cx))
+                .log_err();
+            cx.background_executor()
+                .timer(AGENT_UPDATE_STATUS_SHOWN_FOR)
+                .await;
+            this.update(cx, |this, cx| this.set_agent_update(kind, None, cx))
+                .log_err();
+        });
+        self.agent_updates.insert(
+            kind,
+            AgentUpdate {
+                status: None,
+                checked_at: Instant::now(),
+                _task: task,
+            },
+        );
+    }
+
+    fn set_agent_update(
+        &mut self,
+        kind: AgentKind,
+        status: Option<AgentUpdateStatus>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(update) = self.agent_updates.get_mut(&kind) {
+            update.status = status;
+            cx.notify();
+        }
+    }
+
+    pub fn plan_usage(&self, kind: AgentKind) -> Option<&PlanUsageState> {
+        self.plan_usage.get(&kind)
+    }
+
+    pub fn refresh_plan_usage(&mut self, kind: AgentKind, force: bool, cx: &mut Context<Self>) {
+        if !kind.has_plan_usage() {
+            return;
+        }
+        let state = self.plan_usage.entry(kind).or_default();
+        let min_age = if force {
+            USAGE_FORCED_MIN_INTERVAL
+        } else {
+            USAGE_REFRESH_INTERVAL
+        };
+        if state.loading
+            || state
+                .fetched_at
+                .is_some_and(|fetched_at| fetched_at.elapsed() < min_age)
+        {
+            return;
+        }
+        state.loading = true;
+        let harness_id = kind.harness_id();
+        let request = spawn_agent_work(cx, async move {
+            agent_harness::usage::usage_request(harness_id).await
+        });
+        let http = cx.http_client();
+        let task = cx.spawn(async move |this, cx| {
+            let result = fetch_plan_usage(harness_id, request, http).await;
+            this.update(cx, |this, cx| {
+                let state = this.plan_usage.entry(kind).or_default();
+                state.loading = false;
+                state.fetched_at = Some(Instant::now());
+                state._task = None;
+                match result {
+                    Ok(usage) => {
+                        state.usage = Some(usage);
+                        state.error = None;
+                    }
+                    Err(error) => state.error = Some(error.into()),
+                }
+                cx.notify();
+            })
+            .log_err();
+        });
+        if let Some(state) = self.plan_usage.get_mut(&kind) {
+            state._task = Some(task);
+        }
+    }
+
+    fn new_chat_settings(&self, kind: AgentKind, cx: &App) -> RunSettings {
+        let mut settings = self.defaults.get(&kind).cloned().unwrap_or_default();
+        let chat_settings = AgentChatSettings::get_global(cx);
+        if let Some(effort) = chat_settings.default_effort {
+            settings.reasoning = Some(effort);
+            if let Some(reasoning) = self
+                .models_discovered(kind)
+                .and_then(|models| reasoning_for_model(&settings, models))
+            {
+                settings.reasoning = reasoning;
+            }
+        }
+        settings.permission = chat_settings.default_permission(kind);
+        settings
+    }
+
+    fn remember_settings(
+        &mut self,
+        kind: AgentKind,
+        settings: RunSettings,
+        cx: &mut Context<Self>,
+    ) {
+        if self.defaults.get(&kind) == Some(&settings) {
+            return;
+        }
+        self.defaults.insert(kind, settings);
+        let defaults = self.defaults.clone();
+        let path = defaults_path(&self.directory);
+        let previous_save = std::mem::replace(&mut self.save_defaults_task, Task::ready(()));
+        self.save_defaults_task = cx.background_spawn(async move {
+            previous_save.await;
+            serde_json::to_vec_pretty(&defaults)
+                .map_err(anyhow::Error::from)
+                .and_then(|json| write_atomically(&path, &json))
+                .log_err();
+        });
+    }
+
+    pub fn sessions_in(&self, roots: &[PathBuf], cx: &App) -> Vec<SessionSummary> {
+        let all_projects = self.list_prefs.all_projects;
+        let mut summaries: Vec<SessionSummary> = self
+            .sessions
+            .iter()
+            .filter(|metadata| all_projects || metadata.is_in(roots))
+            .map(|metadata| {
+                let live = self.live.get(&metadata.id).map(|session| session.read(cx));
+                SessionSummary {
+                    id: metadata.id.clone(),
+                    kind: metadata.kind,
+                    title: display_title(&metadata.title),
+                    created_at: metadata.created_at,
+                    updated_at: metadata.updated_at,
+                    working: live.is_some_and(|session| session.is_working()),
+                    needs_input: live.is_some_and(|session| !session.pending_questions.is_empty()),
+                    pinned: metadata.pinned,
+                    parent_id: metadata.parent_id.clone(),
+                    side_chat: metadata.side_chat,
+                    outcome: metadata.outcome,
+                    unseen: metadata.unseen,
+                    project_root: metadata.project_root().to_path_buf(),
+                    branch: metadata.branch.clone(),
+                    native_session_id: metadata.native_session_id.clone(),
+                }
+            })
+            .collect();
+        if self.list_prefs.sort == ChatSort::Created {
+            summaries.sort_by_key(|summary| std::cmp::Reverse(summary.created_at));
+        }
+        summaries
+    }
+
+    pub fn sessions_metadata(&self) -> impl Iterator<Item = &SessionMetadata> {
+        self.sessions.iter()
+    }
+
+    pub fn list_prefs(&self) -> &ChatListPrefs {
+        &self.list_prefs
+    }
+
+    pub fn update_list_prefs(&mut self, change: impl FnOnce(&mut ChatListPrefs), cx: &mut Context<Self>) {
+        change(&mut self.list_prefs);
+        let prefs = self.list_prefs.clone();
+        let path = chat_list_path(&self.directory);
+        let previous_save = std::mem::replace(&mut self.save_list_prefs_task, Task::ready(()));
+        self.save_list_prefs_task = cx.background_spawn(async move {
+            previous_save.await;
+            serde_json::to_vec_pretty(&prefs)
+                .map_err(anyhow::Error::from)
+                .and_then(|json| write_atomically(&path, &json))
+                .log_err();
+        });
+        cx.notify();
+    }
+
+    pub fn saved_messages(&self) -> &[SavedMessage] {
+        &self.saved_messages
+    }
+
+    pub fn saved_text(&self, chat_id: &str, entry: usize) -> Option<&str> {
+        self.saved_messages
+            .iter()
+            .find(|saved| saved.chat_id == chat_id && saved.entry == entry)
+            .map(|saved| saved.text.as_str())
+    }
+
+    fn update_saved_messages(
+        &mut self,
+        change: impl FnOnce(&mut Vec<SavedMessage>),
+        cx: &mut Context<Self>,
+    ) {
+        change(&mut self.saved_messages);
+        let saved = self.saved_messages.clone();
+        let path = saved_messages_path(&self.directory);
+        let previous_save = std::mem::replace(&mut self.save_saved_messages_task, Task::ready(()));
+        self.save_saved_messages_task = cx.background_spawn(async move {
+            previous_save.await;
+            serde_json::to_vec_pretty(&saved)
+                .map_err(anyhow::Error::from)
+                .and_then(|json| write_atomically(&path, &json))
+                .log_err();
+        });
+        cx.notify();
+    }
+
+    pub fn toggle_saved_message(
+        &mut self,
+        chat_id: &str,
+        entry: usize,
+        text: String,
+        from_agent: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let saved = self.saved_text(chat_id, entry) == Some(text.as_str());
+        self.update_saved_messages(
+            |saved_messages| {
+                saved_messages
+                    .retain(|message| !(message.chat_id == chat_id && message.entry == entry));
+                if !saved {
+                    saved_messages.push(SavedMessage {
+                        chat_id: chat_id.to_string(),
+                        entry,
+                        text,
+                        from_agent,
+                        saved_at: now(),
+                    });
+                }
+            },
+            cx,
+        );
+    }
+
+    pub fn update_session_metadata(
+        &mut self,
+        id: &str,
+        change: impl FnOnce(&mut SessionMetadata),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.loaded_session(id) {
+            session.update(cx, |session, cx| session.update_metadata(change, cx));
+            return;
+        }
+        let Some(metadata) = self.sessions.iter_mut().find(|metadata| metadata.id == id) else {
+            return;
+        };
+        change(metadata);
+        let metadata = metadata.clone();
+        let path = metadata_path(&self.directory, &metadata.id);
+        let previous_write = self
+            .metadata_writes
+            .remove(&metadata.id)
+            .unwrap_or_else(|| Task::ready(()));
+        let write = cx.background_spawn(async move {
+            previous_write.await;
+            serde_json::to_vec_pretty(&metadata)
+                .map_err(anyhow::Error::from)
+                .and_then(|json| write_atomically(&path, &json))
+                .log_err();
+        });
+        self.metadata_writes.insert(id.to_string(), write);
+        self.sort();
+        cx.notify();
+    }
+
+    pub fn rename_session(&mut self, id: &str, title: String, cx: &mut Context<Self>) {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        self.update_session_metadata(id, |metadata| metadata.title = title, cx);
+    }
+
+    pub fn set_pinned(&mut self, id: &str, pinned: bool, cx: &mut Context<Self>) {
+        self.update_session_metadata(id, |metadata| metadata.pinned = pinned, cx);
+    }
+
+    pub fn fork_session(
+        &mut self,
+        id: &str,
+        side_chat: bool,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
+        let opening = self.open_session(id, cx);
+        cx.spawn(async move |this, cx| {
+            let parent = opening.await?;
+            this.update(cx, |this, cx| {
+                let (parent_metadata, mut entries, parent_working) =
+                    parent.read_with(cx, |parent, cx| {
+                        let mut entries = parent.transcript.serialize(cx);
+                        if parent.is_working()
+                            && let Some(last_user) = entries
+                                .iter()
+                                .rposition(|entry| matches!(entry, SerializedEntry::User { .. }))
+                        {
+                            entries.truncate(last_user);
+                        }
+                        (parent.metadata.clone(), entries, parent.is_working())
+                    });
+                let mut metadata = SessionMetadata::new(
+                    parent_metadata.kind,
+                    parent_metadata.cwd.clone(),
+                    parent_metadata.settings.clone(),
+                );
+                metadata.parent_id = Some(parent_metadata.id.clone());
+                metadata.settings.permission = parent_metadata.settings.permission;
+                metadata.side_chat = side_chat;
+                metadata.project_root = parent_metadata.project_root.clone();
+                metadata.branch = parent_metadata.branch.clone();
+                metadata.fork_context = fork_context(&entries);
+                if !parent_working {
+                    metadata.fork_source = parent_metadata.native_session_id.clone();
+                }
+                let parent_title = if parent_metadata.title.is_empty() {
+                    NEW_CHAT_TITLE.to_string()
+                } else {
+                    parent_metadata.title.clone()
+                };
+                let template = if side_chat {
+                    entries.clear();
+                    SIDE_CHAT_NOTICE
+                } else {
+                    metadata.title = fork_title(&parent_metadata.title, &this.sessions);
+                    FORKED_NOTICE
+                };
+                let notice = i18n::format(
+                    SharedString::new_static(template),
+                    &[("title", &parent_title)],
+                );
+                entries.push(SerializedEntry::Notice {
+                    text: notice.to_string(),
+                    is_error: false,
+                });
+                Ok(this.insert_session(metadata, SavedTranscript::EntriesOnly(entries), cx))
+            })?
+        })
+    }
+
+    fn insert_session(
+        &mut self,
+        metadata: SessionMetadata,
+        saved: SavedTranscript,
+        cx: &mut Context<Self>,
+    ) -> Entity<AgentSession> {
+        let languages = self.languages.clone();
+        let directory = self.directory.clone();
+        let harness = self.harness(metadata.kind);
+        let session = cx.new(|cx| {
+            let mut session =
+                AgentSession::new(directory, harness, metadata.clone(), saved, languages, cx);
+            session.touch(cx);
+            session
+        });
+        self.sessions.push(metadata);
+        self.sort();
+        self.track(session.clone(), cx);
+        session
+    }
+
+    /// Chats the agent's own app saved for `cwd`, minus the ones Aaykra runs itself.
+    pub fn external_sessions(
+        &mut self,
+        kind: AgentKind,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<ExternalSession>>> {
+        let harness = self.harness(kind);
+        let listing = spawn_agent_work(cx, async move { harness.external_sessions(&cwd).await });
+        cx.spawn(async move |this, cx| {
+            let sessions = listing.await??;
+            this.read_with(cx, |this, _| {
+                let own: HashSet<&str> = this
+                    .sessions
+                    .iter()
+                    .filter_map(|metadata| metadata.native_session_id.as_deref())
+                    .collect();
+                sessions
+                    .into_iter()
+                    .filter(|session| !own.contains(session.id.as_str()))
+                    .collect()
+            })
+        })
+    }
+
+    /// The agent copies the saved chat on the first message, so the original stays as it was.
+    pub fn continue_external(
+        &mut self,
+        kind: AgentKind,
+        cwd: PathBuf,
+        external: ExternalSession,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
+        let harness = self.harness(kind);
+        let history = spawn_agent_work(cx, {
+            let cwd = cwd.clone();
+            let id = external.id.clone();
+            async move { harness.external_history(&cwd, &id).await }
+        });
+        cx.spawn(async move |this, cx| {
+            let events = history.await??;
+            this.update(cx, |this, cx| {
+                let mut metadata =
+                    SessionMetadata::new(kind, cwd, this.new_chat_settings(kind, cx));
+                metadata.title = agent_title(&external.title);
+                metadata.fork_source = Some(external.id);
+                let session =
+                    this.insert_session(metadata, SavedTranscript::EntriesOnly(Vec::new()), cx);
+                session.update(cx, |session, cx| {
+                    session.load_external_history(events, kind.label().to_owned(), cx)
+                });
+                session
+            })
+        })
+    }
+
+    pub fn create_session(
+        &mut self,
+        kind: AgentKind,
+        cwd: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Entity<AgentSession> {
+        self.create_session_in(kind, cwd, None, None, cx)
+    }
+
+    pub fn create_session_in(
+        &mut self,
+        kind: AgentKind,
+        cwd: PathBuf,
+        project_root: Option<PathBuf>,
+        branch: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Entity<AgentSession> {
+        let mut metadata = SessionMetadata::new(kind, cwd, self.new_chat_settings(kind, cx));
+        metadata.project_root = project_root.filter(|root| *root != metadata.cwd);
+        metadata.branch = branch;
+        let languages = self.languages.clone();
+        let directory = self.directory.clone();
+        let harness = self.harness(kind);
+        let session = cx.new(|cx| {
+            AgentSession::new(
+                directory,
+                harness,
+                metadata.clone(),
+                SavedTranscript::EntriesOnly(Vec::new()),
+                languages,
+                cx,
+            )
+        });
+        self.sessions.push(metadata);
+        self.sort();
+        self.track(session.clone(), cx);
+        session
+    }
+
+    pub fn open_session(
+        &mut self,
+        id: &str,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<AgentSession>>> {
+        if let Some(session) = self.loaded_session(id) {
+            return Task::ready(Ok(session));
+        }
+        let Some(metadata) = self
+            .sessions
+            .iter()
+            .find(|metadata| metadata.id == id)
+            .cloned()
+        else {
+            return Task::ready(Err(anyhow::anyhow!("chat {id} not found")));
+        };
+        let directory = self.directory.clone();
+        cx.spawn(async move |this, cx| {
+            let path = entries_path(&directory, &metadata.id);
+            let entries = cx
+                .background_spawn(async move {
+                    match std::fs::read(&path) {
+                        Ok(json) => serde_json::from_slice::<SavedTranscript>(&json)
+                            .context("failed to parse the chat transcript"),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            Ok(SavedTranscript::EntriesOnly(Vec::new()))
+                        }
+                        Err(error) => Err(error).context("failed to read the chat transcript"),
+                    }
+                })
+                .await?;
+            this.update(cx, |this, cx| {
+                if let Some(session) = this.loaded_session(&metadata.id) {
+                    return Ok(session);
+                }
+                if !this.sessions.iter().any(|known| known.id == metadata.id) {
+                    anyhow::bail!("chat {} was deleted", metadata.id);
+                }
+                let languages = this.languages.clone();
+                let harness = this.harness(metadata.kind);
+                let pending_write = this.metadata_writes.remove(&metadata.id);
+                let session = cx.new(|cx| {
+                    let mut session =
+                        AgentSession::new(directory, harness, metadata, entries, languages, cx);
+                    if let Some(pending_write) = pending_write {
+                        session.save_metadata_task = pending_write;
+                    }
+                    session
+                });
+                this.track(session.clone(), cx);
+                Ok(session)
+            })?
+        })
+    }
+
+    pub fn delete_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        let session = self
+            .live
+            .remove(id)
+            .or_else(|| self.released.remove(id)?.upgrade());
+        let mut pending_writes = session
+            .map(|session| session.update(cx, |session, cx| session.close_for_deletion(cx)))
+            .unwrap_or_default();
+        pending_writes.extend(self.metadata_writes.remove(id));
+        self.sessions.retain(|metadata| metadata.id != id);
+        if self
+            .saved_messages
+            .iter()
+            .any(|message| message.chat_id == id)
+        {
+            self.update_saved_messages(|saved| saved.retain(|message| message.chat_id != id), cx);
+        }
+        let id = id.to_string();
+        let directory = self.directory.clone();
+        cx.background_spawn(async move {
+            futures::future::join_all(pending_writes).await;
+            let _guard = FILE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for path in [
+                metadata_path(&directory, &id),
+                entries_path(&directory, &id),
+            ] {
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => log::error!("failed to delete {}: {error}", path.display()),
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    pub fn models_discovered(&self, kind: AgentKind) -> Option<&[Model]> {
+        self.catalogs
+            .get(&kind)
+            .filter(|catalog| catalog.loaded && !catalog.models.is_empty())
+            .map(|catalog| catalog.models.as_slice())
+    }
+
+    fn track(&mut self, session: Entity<AgentSession>, cx: &mut Context<Self>) {
+        let id = session.read(cx).metadata.id.clone();
+        let mut listed = session.read(cx).listed_state();
+        cx.observe(&session, move |this, session, cx| {
+            this.keep_loaded_while_needed(&session, cx);
+            let now_listed = session.read(cx).listed_state();
+            if now_listed != listed {
+                listed = now_listed;
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&session, |this, session, event, cx| match event {
+            SessionEvent::MetadataChanged => {
+                this.keep_loaded_while_needed(&session, cx);
+                let metadata = session.read(cx).metadata.clone();
+                // A native fork copies the parent as it is at the fork's first run, so it must not have moved on.
+                let stale_forks: Vec<String> = this
+                    .sessions
+                    .iter()
+                    .filter(|fork| {
+                        fork.parent_id.as_deref() == Some(metadata.id.as_str())
+                            && fork.fork_source.is_some()
+                            && fork.native_session_id.is_none()
+                            && metadata.updated_at >= fork.created_at
+                    })
+                    .map(|fork| fork.id.clone())
+                    .collect();
+                if let Some(known) = this
+                    .sessions
+                    .iter_mut()
+                    .find(|known| known.id == metadata.id)
+                {
+                    *known = metadata;
+                }
+                for fork in stale_forks {
+                    this.update_session_metadata(&fork, |fork| fork.fork_source = None, cx);
+                }
+                this.sort();
+                cx.notify();
+            }
+            SessionEvent::SettingsChanged => {
+                let session = session.read(cx);
+                let (kind, settings) = (session.kind(), session.settings().clone());
+                this.remember_settings(kind, settings, cx);
+            }
+            SessionEvent::Finished { errored } => {
+                let id = session.read(cx).metadata.id.clone();
+                cx.emit(StoreEvent::SessionFinished {
+                    id,
+                    errored: *errored,
+                });
+            }
+            SessionEvent::NeedsInput => {
+                let id = session.read(cx).metadata.id.clone();
+                cx.emit(StoreEvent::SessionNeedsInput { id });
+            }
+            SessionEvent::CommandsReported(commands) => {
+                let session = session.read(cx);
+                let key = (session.kind(), session.metadata.cwd.clone());
+                let catalog = this.commands.entry(key).or_default();
+                catalog.commands = commands.clone();
+                catalog.error = None;
+                catalog.loaded = true;
+                catalog.fetched_at = Some(Instant::now());
+                cx.notify();
+            }
+        })
+        .detach();
+        self.released.remove(&id);
+        self.live.insert(id, session);
+        self.watch_idle_sessions(cx);
+        cx.notify();
+    }
+
+    fn sort(&mut self) {
+        self.sessions
+            .sort_by_key(|metadata| std::cmp::Reverse(metadata.updated_at));
+    }
+}
+
+async fn fetch_plan_usage(
+    harness_id: HarnessId,
+    request: Task<
+        std::result::Result<
+            std::result::Result<agent_harness::usage::UsageRequest, String>,
+            gpui_tokio::JoinError,
+        >,
+    >,
+    http: Arc<dyn http_client::HttpClient>,
+) -> std::result::Result<PlanUsage, String> {
+    use futures::AsyncReadExt as _;
+    let request = request.await.map_err(|error| error.to_string())??;
+    let mut builder = http_client::Request::builder()
+        .method(http_client::Method::GET)
+        .uri(request.url);
+    for (name, value) in &request.headers {
+        builder = builder.header(*name, value);
+    }
+    let unavailable =
+        |error: anyhow::Error| t!("Usage unavailable: {error}", error = error).to_string();
+    let http_request = builder
+        .body(http_client::AsyncBody::empty())
+        .map_err(|error| unavailable(error.into()))?;
+    let mut response = http.send(http_request).await.map_err(unavailable)?;
+    if !response.status().is_success() {
+        return Err(agent_harness::usage::status_message(
+            response.status().as_u16(),
+        ));
+    }
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .read_to_end(&mut body)
+        .await
+        .map_err(|error| unavailable(error.into()))?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|error| unavailable(error.into()))?;
+    request
+        .parse(harness_id, &json)
+        .ok_or_else(|| t!("Usage unavailable: unexpected response").to_string())
+}
+
+fn load_all_metadata(directory: &Path) -> Result<Vec<SessionMetadata>> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("failed to list saved chats"),
+    };
+    let mut sessions = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        let is_metadata = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".meta.json"));
+        if !is_metadata {
+            continue;
+        }
+        let parsed = std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|json| Ok(serde_json::from_slice::<SessionMetadata>(&json)?))
+            .with_context(|| format!("failed to load {}", path.display()));
+        if let Some(metadata) = parsed.log_err() {
+            sessions.push(metadata);
+        }
+    }
+    Ok(sessions)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    fn fake_claude() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../agent_harness/tests/fixtures/fake-claude.sh")
+    }
+
+    pub(crate) fn new_store(directory: &Path, cx: &mut TestAppContext) -> Entity<AgentStore> {
+        cx.executor().allow_parking();
+        // SAFETY: tests in this crate only ever set these variables to the same fixtures.
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_EXECUTABLE", fake_claude());
+            std::env::set_var(
+                "CLAUDE_CONFIG_DIR",
+                fake_claude().with_file_name("claude-config"),
+            );
+        }
+        cx.update(|cx| {
+            gpui_tokio::init(cx);
+            if !cx.has_global::<settings::SettingsStore>() {
+                let settings = settings::SettingsStore::test(cx);
+                cx.set_global(settings);
+            }
+        });
+        let languages = Arc::new(LanguageRegistry::test(cx.background_executor.clone()));
+        cx.new(|cx| AgentStore::new(directory.into(), languages, cx))
+    }
+
+    pub(crate) fn run_until(
+        cx: &mut TestAppContext,
+        mut done: impl FnMut(&mut TestAppContext) -> bool,
+    ) {
+        for _ in 0..500 {
+            cx.run_until_parked();
+            if done(cx) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the agent never reached the expected state");
+    }
+
+    #[gpui::test]
+    async fn says_once_when_claude_did_not_start_in_auto(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let notices = |cx: &mut TestAppContext| {
+            session.read_with(cx, |session, cx| {
+                summarize(session.entries(), cx)
+                    .into_iter()
+                    .filter(|entry| entry.starts_with("notice: Auto mode isn't available"))
+                    .count()
+            })
+        };
+        let reported = |mode: &str| {
+            vec![AgentEvent::PermissionModeReported {
+                mode: mode.to_string(),
+            }]
+        };
+        feed_events(&session, reported("auto"), cx);
+        assert_eq!(notices(cx), 0);
+        feed_events(&session, reported("default"), cx);
+        feed_events(&session, reported("default"), cx);
+        assert_eq!(notices(cx), 1);
+    }
+
+    #[gpui::test]
+    async fn saved_chats_load_only_while_agent_chat_is_on(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.update_settings(|settings| settings.model = Some("opus".into()), cx)
+        });
+        cx.run_until_parked();
+
+        update_chat_settings(cx, |content| content.enabled = Some(false));
+        let reopened = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        let saved = |cx: &mut TestAppContext| {
+            reopened.read_with(cx, |store, _| store.sessions_metadata().count())
+        };
+        assert_eq!(saved(cx), 0);
+
+        reopened.update(cx, |store, cx| store.load_saved_chats(cx));
+        cx.run_until_parked();
+        assert_eq!(saved(cx), 1);
+    }
+
+    #[test]
+    fn each_agent_is_updated_at_most_once_per_interval() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let attempts = agent_updates_path(&directory.path().join("missing"));
+        assert!(claim_update_attempt(&attempts, AgentKind::Claude));
+        assert!(!claim_update_attempt(&attempts, AgentKind::Claude));
+        assert!(claim_update_attempt(&attempts, AgentKind::Codex));
+
+        let interval_old = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_secs()
+            - AGENT_UPDATE_INTERVAL.as_secs();
+        std::fs::write(&attempts, format!(r#"{{"claude":{interval_old}}}"#))
+            .expect("write attempts");
+        assert!(claim_update_attempt(&attempts, AgentKind::Claude));
+        assert!(!claim_update_attempt(&attempts, AgentKind::Claude));
+    }
+
+    #[gpui::test]
+    async fn saved_chats_open_before_the_chat_list_finishes_loading(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| settings.permission = PermissionMode::FullAccess,
+                cx,
+            )
+        });
+        let id = session_id(&session, cx);
+        cx.run_until_parked();
+
+        let reopened_store = new_store(directory.path(), cx);
+        let reopened = reopened_store
+            .update(cx, |store, cx| {
+                store.open_saved_session(id.clone().into(), cx)
+            })
+            .await
+            .expect("chat reopens");
+        assert_eq!(session_id(&reopened, cx), id);
+    }
+
+    #[gpui::test]
+    async fn a_chosen_permission_mode_stays_with_its_chat(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        assert_eq!(
+            session.read_with(cx, |session, _| session.settings().permission),
+            PermissionMode::Auto
+        );
+        session.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| settings.permission = PermissionMode::FullAccess,
+                cx,
+            )
+        });
+        let id = session_id(&session, cx);
+        cx.run_until_parked();
+
+        let reopened_store = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        let reopened = reopened_store
+            .update(cx, |store, cx| store.open_session(&id, cx))
+            .await
+            .expect("chat reopens");
+        assert_eq!(
+            reopened.read_with(cx, |session, _| session.settings().permission),
+            PermissionMode::FullAccess
+        );
+        let fresh = reopened_store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        assert_eq!(
+            fresh.read_with(cx, |session, _| session.settings().permission),
+            PermissionMode::Auto,
+            "new chats always start in auto"
+        );
+    }
+
+    #[gpui::test]
+    async fn claude_reply_streams_into_the_transcript_and_is_saved(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:happy", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+
+        session.read_with(cx, |session, cx| {
+            assert_eq!(session.metadata().title, "scenario:happy");
+            assert_eq!(
+                session.metadata().native_session_id.as_deref(),
+                Some("sess-1")
+            );
+            let summary: Vec<String> = session
+                .entries()
+                .iter()
+                .map(|entry| match entry {
+                    Entry::User { text, .. } => format!("user: {text}"),
+                    Entry::Assistant { markdown, .. } => {
+                        format!("assistant: {}", markdown.read(cx).source())
+                    }
+                    Entry::Thinking(markdown) => {
+                        format!("thinking: {}", markdown.read(cx).source())
+                    }
+                    Entry::Tool(tool) => format!("tool {}: {:?}", tool.id, tool.status),
+                    Entry::Notice { text, .. } => format!("notice: {text}"),
+                    Entry::Image { path } => format!("image: {}", path.display()),
+                })
+                .collect();
+            assert_eq!(
+                summary,
+                [
+                    "user: scenario:happy",
+                    "thinking: pondering",
+                    "assistant: Hello",
+                    "tool tool-1: Completed",
+                    "tool tool-2: Failed",
+                ]
+            );
+        });
+
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        let saved_entries = entries_path(directory.path(), &session_id(&session, cx));
+        run_until(cx, |_| saved_entries.exists());
+        let summaries = store.read_with(cx, |store, cx| {
+            store.sessions_in(&[directory.path().to_path_buf()], cx)
+        });
+        assert_eq!(summaries.len(), 1);
+        assert!(!summaries[0].working);
+    }
+
+    #[gpui::test]
+    async fn permissions_and_questions_wait_for_the_user(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:askuser", cx)
+        });
+
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.pending_questions().is_empty())
+        });
+        let permission_id = session.read_with(cx, |session, _| {
+            let pending = &session.pending_questions()[0];
+            assert!(pending.is_permission());
+            assert_eq!(pending.questions[0].question, "Run `ls`?");
+            pending.id().to_string()
+        });
+        session.update(cx, |session, cx| {
+            session.answer_permission(&permission_id, true, cx)
+        });
+
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session
+                    .pending_questions()
+                    .first()
+                    .is_some_and(|pending| !pending.is_permission())
+            })
+        });
+        let (question_id, answers) = session.read_with(cx, |session, _| {
+            let pending = &session.pending_questions()[0];
+            let answers = pending
+                .questions
+                .iter()
+                .map(|question| UserInputAnswer {
+                    question_id: question.id.clone(),
+                    labels: vec!["B".into()],
+                })
+                .collect::<Vec<_>>();
+            (pending.id().to_string(), answers)
+        });
+        session.update(cx, |session, cx| session.answer(&question_id, answers, cx));
+
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        session.read_with(cx, |session, _| {
+            assert!(session.pending_questions().is_empty());
+            assert!(
+                !session
+                    .entries()
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Notice { is_error: true, .. })),
+                "the fixture reports an error unless both answers arrive"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn answers_reach_the_agent_and_withdrawals_are_reported(_cx: &mut TestAppContext) {
+        let answer = || {
+            vec![UserInputAnswer {
+                question_id: "q".into(),
+                labels: vec!["A".into()],
+            }]
+        };
+
+        let (agent_tx, agent_rx) = tokio::sync::oneshot::channel();
+        let (chat_tx, chat_rx) = tokio::sync::oneshot::channel();
+        chat_tx.send(answer()).unwrap();
+        assert!(!agent_stopped_waiting(agent_tx, chat_rx).await);
+        assert_eq!(agent_rx.await.unwrap(), answer());
+
+        let (agent_tx, agent_rx) = tokio::sync::oneshot::channel();
+        let (chat_tx, chat_rx) = tokio::sync::oneshot::channel::<Vec<UserInputAnswer>>();
+        drop(agent_rx);
+        assert!(agent_stopped_waiting(agent_tx, chat_rx).await);
+        assert!(chat_tx.is_closed());
+
+        let (agent_tx, agent_rx) = tokio::sync::oneshot::channel();
+        let (chat_tx, chat_rx) = tokio::sync::oneshot::channel();
+        drop(chat_tx);
+        assert!(!agent_stopped_waiting(agent_tx, chat_rx).await);
+        assert!(agent_rx.await.is_err());
+    }
+
+    #[gpui::test]
+    async fn withdrawn_questions_leave_the_picker(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Codex, directory.path().to_path_buf(), cx)
+        });
+        let pending = |id: &str, responder| PendingQuestion {
+            questions: vec![UserInputQuestion {
+                id: id.into(),
+                header: "Choice".into(),
+                question: "Pick one".into(),
+                options: vec!["A".into()],
+                multi_select: false,
+                prefill: None,
+                multiline: false,
+                accepts_typed_answer: false,
+            }],
+            responder,
+        };
+        let (withdrawn_tx, withdrawn_rx) = tokio::sync::oneshot::channel();
+        let (waiting_tx, _waiting_rx) = tokio::sync::oneshot::channel();
+        drop(withdrawn_rx);
+        session.update(cx, |session, cx| {
+            session
+                .pending_questions
+                .push(pending("withdrawn", Some(withdrawn_tx)));
+            session
+                .pending_questions
+                .push(pending("waiting", Some(waiting_tx)));
+            session.pending_questions.push(pending("local", None));
+            session.drop_withdrawn_questions(cx);
+            let ids: Vec<&str> = session
+                .pending_questions()
+                .iter()
+                .map(PendingQuestion::id)
+                .collect();
+            assert_eq!(ids, ["waiting", "local"]);
+        });
+    }
+
+    #[test]
+    fn only_allow_or_deny_permission_requests_count_as_tool_permissions() {
+        let question = |options: &[&str]| PendingQuestion {
+            questions: vec![UserInputQuestion {
+                id: "q".into(),
+                header: agent_harness::claude::PERMISSION_HEADER.into(),
+                question: "Proceed?".into(),
+                options: options.iter().map(|option| option.to_string()).collect(),
+                multi_select: false,
+                prefill: None,
+                multiline: false,
+                accepts_typed_answer: false,
+            }],
+            responder: None,
+        };
+        assert!(question(&["Allow", "Deny"]).is_tool_permission());
+        assert!(!question(&["Yes", "No"]).is_tool_permission());
+    }
+
+    #[gpui::test]
+    async fn agent_activity_is_reported_per_project(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let working_root = directory.path().join("working");
+        let waiting_root = directory.path().join("waiting");
+        let idle_root = directory.path().join("idle");
+        let working = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, working_root.clone(), cx)
+        });
+        let waiting = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, waiting_root.clone(), cx)
+        });
+        store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, idle_root.clone(), cx)
+        });
+        working.update(cx, |session, _| session.working = true);
+        waiting.update(cx, |session, _| {
+            session.working = true;
+            session.pending_questions.push(PendingQuestion {
+                questions: Vec::new(),
+                responder: None,
+            });
+        });
+
+        store.read_with(cx, |store, cx| {
+            let activity = |roots: &[PathBuf]| store.agent_activity_in(roots, cx);
+            assert_eq!(
+                activity(std::slice::from_ref(&working_root)),
+                Some(workspace::AgentActivity::Working)
+            );
+            assert_eq!(
+                activity(std::slice::from_ref(&waiting_root)),
+                Some(workspace::AgentActivity::NeedsInput)
+            );
+            assert_eq!(
+                activity(&[working_root.clone(), waiting_root.clone()]),
+                Some(workspace::AgentActivity::NeedsInput)
+            );
+            assert_eq!(activity(std::slice::from_ref(&idle_root)), None);
+            assert_eq!(activity(&[directory.path().to_path_buf()]), None);
+        });
+    }
+
+    #[gpui::test]
+    async fn agent_activity_changes_are_announced_only_when_they_change(cx: &mut TestAppContext) {
+        use std::{cell::Cell, rc::Rc};
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let changes = cx.update(|cx| {
+            let changes = cx.new(|_| workspace::AgentActivityChanges);
+            cx.set_global(workspace::ProjectAgentActivity {
+                activity: project_agent_activity,
+                changes: changes.clone(),
+            });
+            announce_activity_changes(&store, cx);
+            changes
+        });
+        let announcements = Rc::new(Cell::new(0));
+        let _subscription = cx.update(|cx| {
+            let announcements = announcements.clone();
+            cx.observe(&changes, move |_, _| {
+                announcements.set(announcements.get() + 1)
+            })
+        });
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(announcements.get(), 0, "a new idle chat changes nothing");
+
+        session.update(cx, |session, cx| {
+            session.working = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(announcements.get(), 1);
+
+        session.update(cx, |_, cx| cx.notify());
+        cx.run_until_parked();
+        assert_eq!(
+            announcements.get(),
+            1,
+            "streaming updates alone are not announced"
+        );
+
+        session.update(cx, |session, cx| {
+            session.pending_questions.push(PendingQuestion {
+                questions: Vec::new(),
+                responder: None,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(announcements.get(), 2);
+    }
+
+    #[gpui::test]
+    async fn switching_to_full_access_approves_a_waiting_permission(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:askuser", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.pending_questions().is_empty())
+        });
+
+        session.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| settings.permission = PermissionMode::FullAccess,
+                cx,
+            )
+        });
+
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session
+                    .pending_questions()
+                    .first()
+                    .is_some_and(|pending| !pending.is_permission())
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn picked_settings_become_the_default_for_new_chats(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let first = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Codex, directory.path().to_path_buf(), cx)
+        });
+        first.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| {
+                    settings.model = Some("gpt-5.6-sol".into());
+                    settings.reasoning = Some(ReasoningLevel::High);
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        let second = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Codex, directory.path().to_path_buf(), cx)
+        });
+        second.read_with(cx, |session, _| {
+            assert_eq!(session.settings().model.as_deref(), Some("gpt-5.6-sol"));
+            assert_eq!(session.settings().reasoning, Some(ReasoningLevel::High));
+        });
+        let claude = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        claude.read_with(cx, |session, _| {
+            assert_eq!(session.settings(), &RunSettings::default())
+        });
+    }
+
+    #[gpui::test]
+    async fn context_usage_keeps_known_fields_across_partial_reports(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.apply_event(
+                AgentEvent::ContextUsage {
+                    tokens: Some(20_000),
+                    window: None,
+                },
+                cx,
+            );
+            session.apply_event(
+                AgentEvent::ContextUsage {
+                    tokens: None,
+                    window: Some(200_000),
+                },
+                cx,
+            );
+            session.apply_event(
+                AgentEvent::ContextUsage {
+                    tokens: Some(50_000),
+                    window: Some(0),
+                },
+                cx,
+            );
+        });
+        session.read_with(cx, |session, _| {
+            let context = session.context().expect("context measured");
+            assert_eq!(context.tokens, Some(50_000));
+            assert_eq!(context.window, Some(200_000));
+            assert_eq!(context.fraction(), Some(0.25));
+        });
+    }
+
+    fn last_reply(session: &Entity<AgentSession>, cx: &mut TestAppContext) -> String {
+        session.read_with(cx, |session, cx| {
+            session
+                .entries()
+                .iter()
+                .rev()
+                .find_map(|entry| match entry {
+                    Entry::Assistant { markdown, .. } => {
+                        Some(markdown.read(cx).source().to_string())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn changed_settings_restart_the_agent_with_new_flags(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let script = directory.path().join("echo-args-claude");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+args="$*"
+printf '{"type":"system","subtype":"init","model":"m","tools":[],"cwd":"/tmp","session_id":"sess-args"}\n'
+while read -r line; do
+  printf '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$args"
+  printf '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[]}}\n'
+  printf '{"type":"result","subtype":"success","result":"ok","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-args"}\n'
+done
+"#,
+        )
+        .expect("write fixture");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| {
+            store.harnesses.insert(
+                AgentKind::Claude,
+                Arc::new(ClaudeHarness::new().with_executable(script)),
+            );
+        });
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| {
+                    settings.model = Some("claude-opus-5-5".into());
+                    settings.reasoning = Some(ReasoningLevel::High);
+                },
+                cx,
+            );
+            session.send_message("first", cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        let first = last_reply(&session, cx);
+        assert!(first.contains("--model claude-opus-5-5"), "{first}");
+        assert!(first.contains("--effort high"), "{first}");
+        assert!(!first.contains("--resume"), "{first}");
+
+        session.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| settings.reasoning = Some(ReasoningLevel::Low),
+                cx,
+            );
+            session.send_message("second", cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+                && last_reply(&session, cx) != first
+        });
+        let second = last_reply(&session, cx);
+        assert!(second.contains("--effort low"), "{second}");
+        assert!(second.contains("--resume=sess-args"), "{second}");
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn manual_compaction_reloads_claude_on_the_next_message(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let script = directory.path().join("steer-aware-claude");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+case "$*" in *--resume*) run=resumed;; *) run=new;; esac
+printf '{"type":"system","subtype":"init","model":"m","tools":[],"cwd":"/tmp","session_id":"sess-commands"}\n'
+while read -r line; do
+  case "$line" in *priority*) kind=steer;; *) kind=first;; esac
+  case "$line" in
+    *'"/compact'*)
+      printf '{"type":"system","subtype":"status","status":"compacting","session_id":"sess-commands"}\n'
+      printf '{"type":"system","subtype":"compact_boundary","session_id":"sess-commands","compact_metadata":{"trigger":"manual","pre_tokens":900,"post_tokens":120}}\n'
+      printf '{"type":"system","subtype":"status","status":null,"compact_result":"success","session_id":"sess-commands"}\n';;
+    *'"long task'*)
+      printf '{"type":"system","subtype":"compact_boundary","session_id":"sess-commands","compact_metadata":{"trigger":"auto","pre_tokens":900,"post_tokens":150}}\n';;
+    *'"doomed'*)
+      printf '{"type":"system","subtype":"status","status":"compacting","session_id":"sess-commands"}\n'
+      printf '{"type":"system","subtype":"status","status":null,"compact_result":"failed","compact_error":"prompt_too_long","session_id":"sess-commands"}\n';;
+  esac
+  printf '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s %s"}}}\n' "$run" "$kind"
+  printf '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[]}}\n'
+  printf '{"type":"result","subtype":"success","result":"ok","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-commands"}\n'
+done
+"#,
+        )
+        .expect("write fixture");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| {
+            store.harnesses.insert(
+                AgentKind::Claude,
+                Arc::new(ClaudeHarness::new().with_executable(script)),
+            );
+        });
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+
+        for (message, expected) in [
+            ("hello", "new first"),
+            ("follow up", "new steer"),
+            ("/compact", "new steer"),
+            ("after compacting", "resumed first"),
+            ("long task", "resumed steer"),
+            ("after auto compaction", "resumed steer"),
+            ("doomed", "resumed steer"),
+        ] {
+            let entries_before = session.read_with(cx, |session, _| session.entries().len());
+            session.update(cx, |session, cx| session.send_message(message, cx));
+            run_until(cx, |cx| {
+                session.read_with(cx, |session, _| {
+                    !session.is_working() && session.entries().len() > entries_before + 1
+                })
+            });
+            assert_eq!(last_reply(&session, cx), expected, "reply to {message:?}");
+        }
+        session.read_with(cx, |session, _| {
+            assert!(!session.is_compacting());
+            assert_eq!(
+                session.metadata.context.and_then(|context| context.tokens),
+                Some(150)
+            );
+            let notices: Vec<(&str, bool)> = session
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::Notice { text, is_error } => Some((text.as_ref(), *is_error)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                notices,
+                [
+                    ("Context compacted.", false),
+                    ("Context compacted.", false),
+                    ("Couldn't compact the conversation: prompt_too_long", true),
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn agent_titles_replace_the_first_message_but_not_a_rename(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Opencode, directory.path().to_path_buf(), cx)
+        });
+        let prompt = "Can you look at why login redirects twice after the session expires?";
+        let title_changed = |title: &str| AgentEvent::TitleChanged {
+            title: title.into(),
+        };
+        let id = session.update(cx, |session, cx| {
+            session
+                .transcript
+                .push_user(prompt.into(), Vec::new(), Vec::new());
+            session.metadata.title = title_from(prompt);
+            session.apply_event(title_changed("Fix double login redirect"), cx);
+            assert_eq!(session.metadata.title, "Fix double login redirect");
+            session.apply_event(title_changed("Something else"), cx);
+            assert_eq!(session.metadata.title, "Fix double login redirect");
+            session.metadata.title = title_from(prompt);
+            session.metadata.id.clone()
+        });
+        store.update(cx, |store, cx| {
+            store.rename_session(&id, "Login bug".into(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.apply_event(title_changed("Fix double login redirect"), cx);
+            assert_eq!(session.metadata.title, "Login bug");
+        });
+    }
+
+    #[gpui::test]
+    async fn compacting_label_follows_the_agent(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.working = true;
+            session.apply_event(AgentEvent::Compacting { active: true }, cx);
+            assert!(session.is_compacting());
+            session.apply_event(AgentEvent::Compacting { active: false }, cx);
+            assert!(!session.is_compacting());
+            session.apply_event(AgentEvent::Compacting { active: true }, cx);
+            session.apply_event(
+                AgentEvent::Compacted {
+                    tokens: None,
+                    manual: false,
+                },
+                cx,
+            );
+            assert!(!session.is_compacting());
+            assert!(!session.restart_on_next_send, "auto compaction keeps the process");
+            assert_eq!(session.metadata.context.and_then(|context| context.tokens), None);
+            session.apply_event(AgentEvent::Compacting { active: true }, cx);
+            session.apply_event(
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+                cx,
+            );
+            assert!(!session.is_compacting());
+        });
+    }
+
+    #[gpui::test]
+    async fn commands_are_never_glued_to_messages_sent_while_stopping(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        use_quick_stopping_claude(&store, cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:interrupt", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session.metadata().native_session_id.is_some()
+            })
+        });
+        session.update(cx, |session, cx| {
+            session.stop(cx);
+            session.send_message("/compact", cx);
+            session.send_message("scenario:happy", cx);
+            assert_eq!(
+                session.prompt_after_stop.as_ref().map(|prompt| prompt.text.as_str()),
+                Some("/compact")
+            );
+            let queued: Vec<&str> = session
+                .queue()
+                .iter()
+                .map(|queued| queued.prompt.text.as_str())
+                .collect();
+            assert_eq!(queued, ["scenario:happy"]);
+            assert!(!session.can_steer(&Prompt::from("/compact".to_string())));
+        });
+    }
+
+    fn use_quick_stopping_claude(store: &Entity<AgentStore>, cx: &mut TestAppContext) {
+        store.update(cx, |store, _| {
+            store.harnesses.insert(
+                AgentKind::Claude,
+                Arc::new(
+                    ClaudeHarness::new()
+                        .with_executable(fake_claude())
+                        .with_graces(Duration::from_millis(50), Duration::from_millis(50)),
+                ),
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn message_sent_while_stopping_runs_after_the_stop(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        use_quick_stopping_claude(&store, cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:interrupt", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session.metadata().native_session_id.is_some()
+            })
+        });
+        session.update(cx, |session, cx| {
+            session.stop(cx);
+            session.send_message("scenario:happy", cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+                && last_reply(&session, cx) == "Hello"
+        });
+    }
+
+    #[gpui::test]
+    async fn stopping_keeps_the_agent_for_the_next_message(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| session.send_message("scenario:stop", cx));
+        run_until(cx, |cx| last_reply(&session, cx).starts_with("turn 1 in "));
+        let first = last_reply(&session, cx);
+        let process = first.trim_start_matches("turn 1 in ").to_string();
+
+        session.update(cx, |session, cx| session.stop(cx));
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        session.read_with(cx, |session, _| {
+            let run = session.run.as_ref().expect("the agent is still running");
+            assert!(!run.stopping());
+        });
+
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:stop", cx);
+            session.stop(cx);
+            session.send_message("after the stop", cx);
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+                && last_reply(&session, cx).ends_with(": after the stop")
+        });
+        assert!(
+            last_reply(&session, cx).contains(&format!(" in {process}: ")),
+            "the same process answers: {}",
+            last_reply(&session, cx)
+        );
+    }
+
+    #[gpui::test]
+    async fn deleting_a_running_chat_removes_its_files_for_good(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        use_quick_stopping_claude(&store, cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:interrupt", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| {
+                session.metadata().native_session_id.is_some()
+            })
+        });
+        let id = session_id(&session, cx);
+        let metadata_file = metadata_path(directory.path(), &id);
+        run_until(cx, |_| metadata_file.exists());
+
+        store.update(cx, |store, cx| store.delete_session(&id, cx));
+        session.update(cx, |session, cx| {
+            session.apply_event(
+                AgentEvent::ContextUsage {
+                    tokens: Some(1),
+                    window: Some(2),
+                },
+                cx,
+            );
+            session.send_message("scenario:happy", cx);
+        });
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        run_until(cx, |_| !metadata_file.exists());
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        cx.run_until_parked();
+        assert!(!metadata_file.exists());
+        assert!(!entries_path(directory.path(), &id).exists());
+        session.read_with(cx, |session, _| assert!(!session.is_working()));
+    }
+
+    #[gpui::test]
+    async fn a_steer_started_after_a_turn_ends_counts_as_working(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Codex, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.apply_event(
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+                cx,
+            );
+            assert!(!session.is_working());
+            session.apply_event(
+                AgentEvent::Steered {
+                    assistant_message_id: None,
+                    next_assistant_message_id: None,
+                },
+                cx,
+            );
+            assert!(session.is_working());
+        });
+    }
+
+    #[gpui::test]
+    async fn the_computer_stays_awake_while_an_agent_works(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Codex, directory.path().to_path_buf(), cx)
+        });
+        let set_working = |working: bool, cx: &mut TestAppContext| {
+            session.update(cx, |session, cx| {
+                let event = if working {
+                    AgentEvent::Steered {
+                        assistant_message_id: None,
+                        next_assistant_message_id: None,
+                    }
+                } else {
+                    AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }
+                };
+                session.apply_event(event, cx);
+            });
+            cx.run_until_parked();
+        };
+        assert_eq!(cx.active_idle_sleep_preventions(), 0);
+
+        set_working(true, cx);
+        assert_eq!(cx.active_idle_sleep_preventions(), 1);
+
+        update_chat_settings(cx, |settings| settings.prevent_idle_sleep = Some(false));
+        cx.run_until_parked();
+        assert_eq!(cx.active_idle_sleep_preventions(), 0);
+
+        update_chat_settings(cx, |settings| settings.prevent_idle_sleep = Some(true));
+        cx.run_until_parked();
+        assert_eq!(cx.active_idle_sleep_preventions(), 1);
+
+        session.update(cx, |session, cx| {
+            session.pending_questions.push(PendingQuestion {
+                questions: Vec::new(),
+                responder: None,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.active_idle_sleep_preventions(), 0);
+
+        session.update(cx, |session, cx| {
+            session.pending_questions.clear();
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(cx.active_idle_sleep_preventions(), 1);
+
+        set_working(false, cx);
+        assert_eq!(cx.active_idle_sleep_preventions(), 0);
+    }
+
+    #[gpui::test]
+    async fn a_stopped_message_can_be_edited_until_the_agent_changes_something(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let stopped_turn = |session: &Entity<AgentSession>, prompts, call, cx: &mut _| {
+            feed_stopped_turn(session, "fix teh bug", prompts, call, cx)
+        };
+        let read = || ToolCall::ReadFile {
+            path: "src/main.rs".into(),
+        };
+        let editable = |cx: &mut TestAppContext| {
+            session.read_with(cx, |session, _| session.editable_message())
+        };
+
+        stopped_turn(&session, 1, read(), cx);
+        assert_eq!(editable(cx), Some(0));
+        let prompt = session.update(cx, |session, cx| session.edit_last_message(cx));
+        assert_eq!(
+            prompt.map(|prompt| prompt.text),
+            Some("fix teh bug".to_string())
+        );
+        session.read_with(cx, |session, _| {
+            assert!(session.entries().is_empty());
+            assert_eq!(
+                session.metadata().dropped_prompt.as_deref(),
+                Some("prompt-1")
+            );
+            assert_eq!(session.metadata().title, "");
+        });
+
+        session.update(cx, |session, _| session.transcript.entries.clear());
+        stopped_turn(
+            &session,
+            1,
+            ToolCall::Exec {
+                command: "rm -rf build".into(),
+            },
+            cx,
+        );
+        assert_eq!(editable(cx), None);
+
+        session.update(cx, |session, _| session.transcript.entries.clear());
+        stopped_turn(&session, 2, read(), cx);
+        assert_eq!(
+            editable(cx),
+            None,
+            "a steered turn holds more than the last message"
+        );
+
+        session.update(cx, |session, _| session.transcript.entries.clear());
+        stopped_turn(&session, 1, read(), cx);
+        session.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        assert_eq!(editable(cx), None);
+        session.read_with(cx, |session, _| {
+            assert_eq!(
+                session.metadata().dropped_prompt,
+                None,
+                "the next run forgets it"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_turn_the_agent_starts_on_its_own_counts_as_working(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let done = || AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        };
+        session.update(cx, |session, cx| {
+            for wake in [
+                AgentEvent::TextDelta {
+                    text: "The build finished.".into(),
+                },
+                AgentEvent::ReasoningDelta {
+                    text: "Checking the output".into(),
+                },
+                AgentEvent::ToolCall {
+                    id: "tool-1".into(),
+                    call: ToolCall::Exec {
+                        command: "cat build.log".into(),
+                    },
+                },
+            ] {
+                session.apply_event(done(), cx);
+                assert!(!session.is_working());
+                session.apply_event(wake, cx);
+                assert!(session.is_working());
+                assert!(session.working_since().is_some());
+            }
+            session.apply_event(done(), cx);
+            session.apply_event(
+                AgentEvent::TaskFinished {
+                    task_id: "task-1".into(),
+                    status: DoneStatus::Completed,
+                },
+                cx,
+            );
+            session.apply_event(
+                AgentEvent::ContextUsage {
+                    tokens: Some(10),
+                    window: None,
+                },
+                cx,
+            );
+            assert!(!session.is_working());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_chat_deleted_while_opening_stays_deleted(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let id = store.update(cx, |store, cx| {
+            let session =
+                store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx);
+            session.read(cx).metadata().id.clone()
+        });
+        store.update(cx, |store, _| store.live.clear());
+        let opening = store.update(cx, |store, cx| store.open_session(&id, cx));
+        store.update(cx, |store, cx| store.delete_session(&id, cx));
+        assert!(opening.await.is_err());
+        store.read_with(cx, |store, _| assert!(!store.live.contains_key(&id)));
+    }
+
+    #[gpui::test]
+    async fn background_tasks_follow_the_live_list(cx: &mut TestAppContext) {
+        use agent_harness::{BackgroundTaskInfo, BackgroundTaskKind};
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let info = |task_id: &str, kind| BackgroundTaskInfo {
+            task_id: task_id.into(),
+            kind,
+            description: String::new(),
+        };
+        feed_events(
+            &session,
+            vec![
+                AgentEvent::TaskStarted {
+                    task_id: "fg1".into(),
+                    tool_use_id: Some("toolu_fg".into()),
+                    kind: BackgroundTaskKind::Shell,
+                    description: "Foreground command".into(),
+                },
+                AgentEvent::TaskStarted {
+                    task_id: "bg1".into(),
+                    tool_use_id: Some("toolu_bg".into()),
+                    kind: BackgroundTaskKind::Shell,
+                    description: "Run tests".into(),
+                },
+            ],
+            cx,
+        );
+        let tasks = |cx: &mut TestAppContext| {
+            session.read_with(cx, |session, _| {
+                session
+                    .background_tasks()
+                    .iter()
+                    .map(|task| (task.task_id.clone(), task.description.clone(), task.tool_use_id.clone()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert!(tasks(cx).is_empty(), "started tasks are not background work by themselves");
+        feed_events(
+            &session,
+            vec![AgentEvent::BackgroundTasksChanged {
+                tasks: vec![
+                    info("bg1", BackgroundTaskKind::Shell),
+                    info("a1", BackgroundTaskKind::Agent),
+                ],
+            }],
+            cx,
+        );
+        assert_eq!(
+            tasks(cx),
+            [
+                ("bg1".into(), "Run tests".into(), Some("toolu_bg".into())),
+                ("a1".into(), String::new(), None),
+            ]
+        );
+        feed_events(
+            &session,
+            vec![AgentEvent::TaskStarted {
+                task_id: "a1".into(),
+                tool_use_id: Some("toolu_agent".into()),
+                kind: BackgroundTaskKind::Agent,
+                description: "Explore".into(),
+            }],
+            cx,
+        );
+        assert_eq!(
+            tasks(cx)[1],
+            ("a1".into(), "Explore".into(), Some("toolu_agent".into())),
+            "a start message after the list fills in the task"
+        );
+        feed_events(
+            &session,
+            vec![AgentEvent::BackgroundTasksChanged {
+                tasks: vec![info("a1", BackgroundTaskKind::Agent)],
+            }],
+            cx,
+        );
+        assert_eq!(tasks(cx).len(), 1, "the list replaces the set even without an end message");
+        feed_events(
+            &session,
+            vec![AgentEvent::TaskFinished {
+                task_id: "a1".into(),
+                status: DoneStatus::Completed,
+            }],
+            cx,
+        );
+        assert!(tasks(cx).is_empty());
+        feed_events(
+            &session,
+            vec![AgentEvent::BackgroundTasksChanged {
+                tasks: vec![info("bg2", BackgroundTaskKind::Shell)],
+            }],
+            cx,
+        );
+        session.update(cx, |session, cx| session.run_ended(cx));
+        assert!(tasks(cx).is_empty(), "tasks end with the agent process");
+    }
+
+    #[gpui::test]
+    async fn empty_reasoning_never_adds_a_thought(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        feed_events(
+            &session,
+            vec![
+                AgentEvent::ReasoningDelta {
+                    text: String::new(),
+                },
+                AgentEvent::TextDelta {
+                    text: "one ".into(),
+                },
+                AgentEvent::ReasoningDelta {
+                    text: String::new(),
+                },
+                AgentEvent::TextDelta { text: "two".into() },
+            ],
+            cx,
+        );
+        assert_eq!(last_reply(&session, cx), "one two");
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.entries().len(), 1);
+        });
+    }
+
+    pub(crate) fn feed_user(session: &Entity<AgentSession>, text: &str, cx: &mut TestAppContext) {
+        session.update(cx, |session, cx| {
+            session
+                .transcript
+                .push_user(text.to_string(), Vec::new(), Vec::new());
+            cx.notify();
+        });
+    }
+
+    pub(crate) fn feed_events(
+        session: &Entity<AgentSession>,
+        events: Vec<AgentEvent>,
+        cx: &mut TestAppContext,
+    ) {
+        session.update(cx, |session, cx| {
+            session.working = true;
+            for event in events {
+                session.apply_event(event, cx);
+            }
+        });
+    }
+
+    pub(crate) fn feed_stopped_turn(
+        session: &Entity<AgentSession>,
+        text: &str,
+        prompts: usize,
+        call: ToolCall,
+        cx: &mut TestAppContext,
+    ) {
+        session.update(cx, |session, _| {
+            session
+                .transcript
+                .push_user(text.into(), Vec::new(), Vec::new());
+            session.metadata.title = title_from(text);
+            session.turn_prompts = prompts;
+            session.turn_prompt_id = None;
+            session.editable_prompt = None;
+            session.user_stopped = true;
+        });
+        feed_events(
+            session,
+            vec![
+                AgentEvent::PromptRecorded {
+                    id: "prompt-1".into(),
+                },
+                AgentEvent::PromptRecorded {
+                    id: "prompt-2".into(),
+                },
+                AgentEvent::ToolCall {
+                    id: "tool-1".into(),
+                    call,
+                },
+                AgentEvent::Done {
+                    status: DoneStatus::Interrupted,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            ],
+            cx,
+        );
+    }
+
+    pub(crate) fn feed_subagent(session: &Entity<AgentSession>, cx: &mut TestAppContext) {
+        let child = |event| AgentEvent::Subagent {
+            parent_tool_use_id: "spawn-1".into(),
+            event: Box::new(event),
+        };
+        session.update(cx, |session, cx| {
+            session.working = true;
+            for event in [
+                AgentEvent::ToolCall {
+                    id: "spawn-1".into(),
+                    call: ToolCall::Unknown {
+                        name: "Agent: scan the repo".into(),
+                        input: None,
+                    },
+                },
+                child(AgentEvent::UserMessage {
+                    text: "Scan the repo".into(),
+                }),
+                child(AgentEvent::TextDelta {
+                    text: "Looking".into(),
+                }),
+                child(AgentEvent::ToolCall {
+                    id: "child-tool".into(),
+                    call: ToolCall::Exec {
+                        command: "ls".into(),
+                    },
+                }),
+            ] {
+                session.apply_event(event, cx);
+            }
+        });
+    }
+
+    fn summarize(entries: &[Entry], cx: &App) -> Vec<String> {
+        entries
+            .iter()
+            .map(|entry| match entry {
+                Entry::User { text, .. } => format!("user: {text}"),
+                Entry::Assistant { markdown, .. } => {
+                    format!("assistant: {}", markdown.read(cx).source())
+                }
+                Entry::Thinking(markdown) => format!("thinking: {}", markdown.read(cx).source()),
+                Entry::Tool(tool) => format!("tool {}: {:?}", tool.id, tool.status),
+                Entry::Notice { text, .. } => format!("notice: {text}"),
+                Entry::Image { path } => format!("image: {}", path.display()),
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    async fn subagent_activity_gets_its_own_saved_transcript(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        feed_subagent(&session, cx);
+        session.read_with(cx, |session, cx| {
+            assert_eq!(summarize(session.entries(), cx), ["tool spawn-1: Running"]);
+            let subagent = session.subagent("spawn-1").expect("subagent recorded");
+            assert_eq!(
+                summarize(subagent.entries(), cx),
+                [
+                    "user: Scan the repo",
+                    "assistant: Looking",
+                    "tool child-tool: Running"
+                ]
+            );
+            assert_eq!(subagent.status(), None);
+        });
+        session.update(cx, |session, cx| {
+            session.apply_event(
+                AgentEvent::Subagent {
+                    parent_tool_use_id: "spawn-1".into(),
+                    event: Box::new(AgentEvent::Done {
+                        status: DoneStatus::Completed,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }),
+                },
+                cx,
+            );
+            assert!(!session.subagent_running("spawn-1"));
+        });
+
+        let id = session_id(&session, cx);
+        session.update(cx, |session, cx| session.touch(cx));
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        cx.run_until_parked();
+        let reopened_store = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        let reopened = reopened_store
+            .update(cx, |store, cx| store.open_session(&id, cx))
+            .await
+            .expect("chat reopens");
+        reopened.read_with(cx, |session, cx| {
+            let subagent = session.subagent("spawn-1").expect("subagent saved");
+            assert_eq!(subagent.status(), Some(DoneStatus::Completed));
+            assert_eq!(
+                summarize(subagent.entries(), cx),
+                [
+                    "user: Scan the repo",
+                    "assistant: Looking",
+                    "tool child-tool: Canceled"
+                ]
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_background_subagent_runs_after_the_turn_that_spawned_it(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        feed_subagent(&session, cx);
+        session.update(cx, |session, cx| {
+            let (steering, _) = tokio::sync::mpsc::channel(1);
+            session.run = Some(ActiveRun {
+                steering,
+                interrupt: CancellationToken::new(),
+                stopping_turn: false,
+                stop_acknowledged: None,
+                stop_timeout: None,
+                permission: tokio::sync::watch::channel(PermissionMode::Ask).0,
+                _events: Task::ready(()),
+            });
+            for event in [
+                AgentEvent::TaskStarted {
+                    task_id: "agent-task".into(),
+                    tool_use_id: Some("spawn-1".into()),
+                    kind: agent_harness::BackgroundTaskKind::Agent,
+                    description: "Scan the repo".into(),
+                },
+                AgentEvent::ToolResult {
+                    id: "spawn-1".into(),
+                    is_error: false,
+                    output: Some("Started in the background".into()),
+                    diff: None,
+                },
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+            ] {
+                session.apply_event(event, cx);
+            }
+            assert!(!session.is_working());
+            assert!(session.subagent_running("spawn-1"));
+            session.apply_event(
+                AgentEvent::TaskFinished {
+                    task_id: "agent-task".into(),
+                    status: DoneStatus::Completed,
+                },
+                cx,
+            );
+            assert!(!session.subagent_running("spawn-1"));
+        });
+    }
+
+    #[gpui::test]
+    async fn claude_background_subagent_traffic_lands_in_its_transcript(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:wake", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| session.run.is_none() && !session.is_working())
+        });
+        session.read_with(cx, |session, cx| {
+            let subagent = session.subagent("toolu_agent").expect("subagent recorded");
+            assert_eq!(
+                summarize(subagent.entries(), cx),
+                ["assistant: sub working", "tool sub-t1: Completed"]
+            );
+            assert!(!summarize(session.entries(), cx).contains(&"assistant: sub working".into()));
+        });
+    }
+
+    #[test]
+    fn transcripts_saved_before_subagents_still_load() {
+        let saved: SavedTranscript =
+            serde_json::from_str(r#"[{"type":"user","text":"hi","at":1}]"#).expect("parses");
+        assert!(matches!(saved, SavedTranscript::EntriesOnly(entries) if entries.len() == 1));
+        let saved: SavedTranscript =
+            serde_json::from_str(r#"{"entries":[],"subagents":[{"id":"a","entries":[]}]}"#)
+                .expect("parses");
+        assert!(
+            matches!(saved, SavedTranscript::Current { subagents, .. } if subagents.len() == 1)
+        );
+        let saved: SavedTranscript =
+            serde_json::from_str(r#"{"entries":[],"queue":[{"text":"later"}]}"#).expect("parses");
+        assert!(matches!(saved, SavedTranscript::Current { queue, .. } if queue.len() == 1));
+    }
+
+    fn user_texts(session: &Entity<AgentSession>, cx: &mut TestAppContext) -> Vec<String> {
+        session.read_with(cx, |session, _| {
+            session
+                .entries()
+                .iter()
+                .filter_map(|entry| match entry {
+                    Entry::User { text, .. } => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    fn update_chat_settings(
+        cx: &mut TestAppContext,
+        update: impl FnOnce(&mut settings::AgentChatSettingsContent),
+    ) {
+        cx.update(|cx| {
+            <settings::SettingsStore as gpui::UpdateGlobal>::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    update(content.agent_chat.get_or_insert_default())
+                })
+            })
+        });
+    }
+
+    #[gpui::test]
+    async fn new_chats_start_with_the_default_effort_and_permission(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let remembered = RunSettings {
+            model: Some("opus".into()),
+            reasoning: Some(ReasoningLevel::Low),
+            permission: PermissionMode::Ask,
+            ..RunSettings::default()
+        };
+        let remembered_without_permission = RunSettings {
+            permission: PermissionMode::Auto,
+            ..remembered.clone()
+        };
+        store.update(cx, |store, cx| {
+            store.remember_settings(AgentKind::Claude, remembered.clone(), cx);
+            store.remember_settings(AgentKind::Codex, remembered.clone(), cx);
+        });
+        let new_chat_settings = |kind, cx: &mut TestAppContext| {
+            store.update(cx, |store, cx| {
+                let session = store.create_session(kind, directory.path().to_path_buf(), cx);
+                session.read(cx).settings().clone()
+            })
+        };
+        assert_eq!(
+            new_chat_settings(AgentKind::Claude, cx),
+            remembered_without_permission
+        );
+
+        update_chat_settings(cx, |content| {
+            content.default_effort = Some(settings::AgentChatDefaultEffort::High);
+            content.default_permission = Some(settings::AgentChatDefaultPermissionContent {
+                claude_code: Some(settings::ClaudeCodePermissionDefault::Bypass),
+                ..Default::default()
+            });
+        });
+        let claude = new_chat_settings(AgentKind::Claude, cx);
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        assert_eq!(claude.reasoning, Some(ReasoningLevel::High));
+        assert_eq!(claude.permission, PermissionMode::FullAccess);
+        let codex = new_chat_settings(AgentKind::Codex, cx);
+        assert_eq!(codex.reasoning, Some(ReasoningLevel::High));
+        assert_eq!(codex.permission, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn effort_the_model_does_not_offer_falls_back_to_the_model_default() {
+        let model = |id: &str, levels: Vec<ReasoningLevel>| Model {
+            id: id.into(),
+            label: id.into(),
+            description: None,
+            reasoning_levels: levels,
+            options: Vec::new(),
+        };
+        let models = [
+            model(
+                "gpt",
+                vec![
+                    ReasoningLevel::Low,
+                    ReasoningLevel::Medium,
+                    ReasoningLevel::High,
+                ],
+            ),
+            model("haiku", Vec::new()),
+        ];
+        let settings = |model: &str, reasoning| RunSettings {
+            model: Some(model.into()),
+            reasoning: Some(reasoning),
+            ..RunSettings::default()
+        };
+        assert_eq!(
+            reasoning_for_model(&settings("gpt", ReasoningLevel::Max), &models),
+            Some(Some(ReasoningLevel::High))
+        );
+        assert_eq!(
+            reasoning_for_model(&settings("gpt", ReasoningLevel::Low), &models),
+            None
+        );
+        assert_eq!(
+            reasoning_for_model(&settings("haiku", ReasoningLevel::High), &models),
+            Some(None)
+        );
+        assert_eq!(
+            reasoning_for_model(&settings("custom", ReasoningLevel::Max), &models),
+            None
+        );
+    }
+
+    #[gpui::test]
+    async fn messages_sent_while_working_steer_when_set_to(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        use_quick_stopping_claude(&store, cx);
+        update_chat_settings(cx, |content| {
+            content.while_working = Some(settings::AgentChatWhileWorking::Steer);
+        });
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.send_message("scenario:interrupt", cx)
+        });
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| session.run.is_some())
+        });
+        session.update(cx, |session, cx| session.send_message("change of plan", cx));
+        assert!(session.read_with(cx, |session, _| session.queue().is_empty()));
+        assert_eq!(
+            user_texts(&session, cx),
+            ["scenario:interrupt", "change of plan"]
+        );
+    }
+
+    #[gpui::test]
+    async fn messages_sent_while_working_queue_and_go_out_after_the_turn(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        use_quick_stopping_claude(&store, cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| session.send_message("scenario:interrupt", cx));
+        run_until(cx, |cx| session.read_with(cx, |session, _| session.run.is_some()));
+        session.update(cx, |session, cx| {
+            session.send_message("first queued", cx);
+            session.send_message("second queued", cx);
+            session.send_message("third queued", cx);
+        });
+        let ids: Vec<u64> = session.read_with(cx, |session, _| {
+            session.queue().iter().map(|queued| queued.id).collect()
+        });
+        assert_eq!(ids.len(), 3);
+        assert_eq!(user_texts(&session, cx), ["scenario:interrupt"]);
+        session.update(cx, |session, cx| {
+            session.move_queued(ids[2], 0, cx);
+            session.remove_queued(ids[1], cx);
+        });
+        let prompt = session
+            .update(cx, |session, cx| session.begin_queued_edit(ids[0], cx))
+            .expect("queued message");
+        session.update(cx, |session, cx| {
+            session.finish_queued_edit(
+                ids[0],
+                Some(Prompt::text(format!("{} edited", prompt.text))),
+                cx,
+            )
+        });
+        let queued: Vec<String> = session.read_with(cx, |session, _| {
+            session.queue().iter().map(|queued| queued.prompt.text.clone()).collect()
+        });
+        assert_eq!(queued, ["third queued", "first queued edited"]);
+
+        session.update(cx, |session, cx| {
+            session.apply_event(
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+                cx,
+            );
+        });
+        assert_eq!(
+            user_texts(&session, cx),
+            ["scenario:interrupt", "third queued"]
+        );
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.queue().len(), 1);
+            assert!(session.is_working());
+        });
+    }
+
+    #[gpui::test]
+    async fn send_now_shows_the_message_and_queue_order_survives_idle(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        use_quick_stopping_claude(&store, cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| session.send_message("scenario:interrupt", cx));
+        run_until(cx, |cx| session.read_with(cx, |session, _| session.run.is_some()));
+        session.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        let id = session.read_with(cx, |session, _| session.queue()[0].id);
+        session.update(cx, |session, cx| session.send_queued_now(id, cx));
+        assert_eq!(
+            user_texts(&session, cx),
+            ["scenario:interrupt", "scenario:happy"]
+        );
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+                && last_reply(&session, cx) == "Hello"
+        });
+
+        session.update(cx, |session, cx| {
+            session.enqueue(Prompt::text("older"), cx);
+            session.send_message("newer", cx);
+        });
+        assert_eq!(user_texts(&session, cx).last().map(String::as_str), Some("older"));
+        let queued: Vec<String> = session.read_with(cx, |session, _| {
+            session.queue().iter().map(|queued| queued.prompt.text.clone()).collect()
+        });
+        assert_eq!(queued, ["newer"]);
+    }
+
+    #[gpui::test]
+    async fn the_queue_continues_after_a_failed_turn_but_not_after_stop(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let done = |status| AgentEvent::Done {
+            status,
+            result: None,
+            error: None,
+            session_id: None,
+        };
+        session.update(cx, |session, cx| {
+            session.enqueue(Prompt::text("after error"), cx);
+            session.working = true;
+            session.apply_event(done(DoneStatus::Errored), cx);
+        });
+        assert_eq!(user_texts(&session, cx).last().map(String::as_str), Some("after error"));
+
+        session.update(cx, |session, cx| {
+            session.enqueue(Prompt::text("after stop"), cx);
+            session.stop(cx);
+            session.working = true;
+            session.apply_event(done(DoneStatus::Interrupted), cx);
+            session.run_ended(cx);
+        });
+        session.read_with(cx, |session, _| assert_eq!(session.queue().len(), 1));
+    }
+
+    pub(crate) fn enqueue(session: &Entity<AgentSession>, text: &str, cx: &mut TestAppContext) {
+        session.update(cx, |session, cx| session.enqueue(Prompt::text(text), cx));
+    }
+
+    fn saved_queue(session: &Entity<AgentSession>, cx: &mut TestAppContext) -> Vec<String> {
+        session.read_with(cx, |session, cx| match session.saved_transcript(cx) {
+            SavedTranscript::Current { queue, .. } => {
+                queue.into_iter().map(|prompt| prompt.text).collect()
+            }
+            SavedTranscript::EntriesOnly(_) => Vec::new(),
+        })
+    }
+
+    #[gpui::test]
+    async fn a_queued_message_being_edited_stays_saved_and_is_not_sent(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        enqueue(&session, "being edited", cx);
+        enqueue(&session, "next up", cx);
+        let edited_id = session.read_with(cx, |session, _| session.queue()[0].id);
+        let prompt = session
+            .update(cx, |session, cx| session.begin_queued_edit(edited_id, cx))
+            .expect("queued message");
+        assert_eq!(prompt.text, "being edited");
+        assert_eq!(saved_queue(&session, cx), ["being edited", "next up"]);
+
+        session.update(cx, |session, cx| {
+            session.working = true;
+            session.apply_event(
+                AgentEvent::Done {
+                    status: DoneStatus::Completed,
+                    result: None,
+                    error: None,
+                    session_id: None,
+                },
+                cx,
+            );
+        });
+        assert_eq!(user_texts(&session, cx).last().map(String::as_str), Some("next up"));
+        assert_eq!(saved_queue(&session, cx), ["being edited"]);
+
+        session.update(cx, |session, cx| {
+            session.finish_queued_edit(edited_id, Some(Prompt::text("  ")), cx)
+        });
+        session.read_with(cx, |session, _| assert_eq!(session.editing_queued(), None));
+        assert_eq!(saved_queue(&session, cx), ["being edited"]);
+    }
+
+    #[gpui::test]
+    async fn retrying_keeps_unrelated_errors(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            session.transcript.push_notice("older crash".into(), true);
+            session
+                .transcript
+                .push_user("failed".into(), Vec::new(), Vec::new());
+            session.fail_run("could not start".into(), cx);
+        });
+        let index = session.read_with(cx, |session, _| {
+            session
+                .entries()
+                .iter()
+                .position(|entry| matches!(entry, Entry::User { undelivered: true, .. }))
+                .expect("undelivered message")
+        });
+        session.update(cx, |session, cx| session.retry_undelivered(index, cx));
+        session.read_with(cx, |session, cx| {
+            let summary = summarize(session.entries(), cx);
+            assert_eq!(summary[0], "notice: older crash");
+            assert!(!summary.contains(&"notice: could not start".to_string()));
+            assert_eq!(summary.iter().filter(|line| *line == "user: failed").count(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn pins_and_names_are_saved_without_opening_the_chat(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let id = store.update(cx, |store, cx| {
+            let session = store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx);
+            session.update(cx, |session, cx| session.touch(cx));
+            session.read(cx).metadata().id.clone()
+        });
+        store.update(cx, |store, _| store.live.clear());
+        store.update(cx, |store, cx| {
+            store.rename_session(&id, "  Renamed  ".into(), cx);
+            store.set_pinned(&id, true, cx);
+        });
+        cx.run_until_parked();
+        let reopened = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        reopened.read_with(cx, |store, cx| {
+            let summary = &store.sessions_in(&[directory.path().to_path_buf()], cx)[0];
+            assert_eq!(summary.title.as_ref(), "Renamed");
+            assert!(summary.pinned);
+        });
+    }
+
+    #[gpui::test]
+    async fn saved_messages_toggle_persist_and_leave_with_their_chat(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        let id = store.update(cx, |store, cx| {
+            let session =
+                store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx);
+            session.read(cx).metadata().id.clone()
+        });
+        store.update(cx, |store, cx| {
+            store.toggle_saved_message(&id, 0, "fix the bug".into(), false, cx);
+            store.toggle_saved_message(&id, 1, "Fixed it.".into(), true, cx);
+            store.toggle_saved_message(&id, 1, "Fixed it.".into(), true, cx);
+            store.toggle_saved_message(&id, 3, "Old reply".into(), true, cx);
+            store.toggle_saved_message(&id, 3, "Old reply, then more".into(), true, cx);
+        });
+        cx.run_until_parked();
+        let saved = |store: &Entity<AgentStore>, cx: &mut TestAppContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .saved_messages()
+                    .iter()
+                    .map(|message| (message.entry, message.text.clone()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let expected = vec![
+            (0, "fix the bug".to_string()),
+            (3, "Old reply, then more".to_string()),
+        ];
+        assert_eq!(saved(&store, cx), expected);
+        let reopened = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        assert_eq!(saved(&reopened, cx), expected);
+
+        reopened.update(cx, |store, cx| store.delete_session(&id, cx));
+        assert!(saved(&reopened, cx).is_empty());
+    }
+
+    #[gpui::test]
+    async fn messages_saved_with_the_chat_list_move_to_their_own_file(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let saved = serde_json::json!({
+            "chat_id": "a",
+            "entry": 2,
+            "text": "Fixed it.",
+            "from_agent": true,
+            "saved_at": 1,
+        });
+        std::fs::write(
+            chat_list_path(directory.path()),
+            serde_json::json!({ "compact_rows": true, "saved_messages": [saved] }).to_string(),
+        )
+        .expect("chat list");
+        let store = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert!(store.list_prefs().compact_rows);
+            assert_eq!(store.saved_text("a", 2), Some("Fixed it."));
+        });
+        let file = |path: PathBuf| std::fs::read_to_string(path).expect("written");
+        assert!(file(saved_messages_path(directory.path())).contains("Fixed it."));
+        assert!(!file(chat_list_path(directory.path())).contains("Fixed it."));
+    }
+
+    #[test]
+    fn chats_and_list_settings_saved_with_sections_or_archived_still_load() {
+        let metadata: SessionMetadata = serde_json::from_value(serde_json::json!({
+            "id": "a",
+            "kind": "claude",
+            "title": "",
+            "cwd": "/tmp",
+            "created_at": 1,
+            "updated_at": 1,
+            "native_session_id": null,
+            "settings": {},
+            "section": "old-section",
+            "archived": true,
+        }))
+        .expect("old metadata loads");
+        assert_eq!(metadata.id, "a");
+        let prefs: ChatListPrefs = serde_json::from_value(serde_json::json!({
+            "sections": [{ "id": "old-section", "name": "Later" }],
+            "compact_rows": true,
+        }))
+        .expect("old list settings load");
+        assert!(prefs.compact_rows);
+    }
+
+    #[gpui::test]
+    async fn saved_chats_load_their_history_and_keep_its_context(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let exec = |command: &str| ToolCall::Exec {
+            command: command.into(),
+        };
+        session.update(cx, |session, cx| {
+            session.load_external_history(
+                vec![
+                    AgentEvent::UserMessage {
+                        text: "Fix the bug".into(),
+                    },
+                    AgentEvent::ReasoningDelta {
+                        text: "Check the tests".into(),
+                    },
+                    AgentEvent::ToolCall {
+                        id: "t1".into(),
+                        call: exec("cargo test"),
+                    },
+                    AgentEvent::ToolResult {
+                        id: "t1".into(),
+                        is_error: false,
+                        output: None,
+                        diff: None,
+                    },
+                    AgentEvent::TextDelta {
+                        text: "Fixed.".into(),
+                    },
+                    AgentEvent::AssistantMessageCompleted {
+                        assistant_message_id: String::new(),
+                    },
+                    AgentEvent::ToolCall {
+                        id: "t2".into(),
+                        call: exec("git push"),
+                    },
+                ],
+                "Claude Code".into(),
+                cx,
+            )
+        });
+        session.read_with(cx, |session, cx| {
+            assert_eq!(
+                summarize(session.entries(), cx),
+                [
+                    "user: Fix the bug",
+                    "thinking: Check the tests",
+                    "tool t1: Completed",
+                    "assistant: Fixed.",
+                    "tool t2: Canceled",
+                    "notice: Continued from a saved Claude Code chat",
+                ]
+            );
+            let context = session.metadata().fork_context.clone().expect("history");
+            assert!(context.contains("Fix the bug") && context.contains("Fixed."));
+            assert!(!session.is_working());
+        });
+    }
+
+    #[gpui::test]
+    async fn forks_get_the_next_free_number(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let parent = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let parent_id = session_id(&parent, cx);
+        store.update(cx, |store, cx| {
+            store.rename_session(&parent_id, "Chat".to_string(), cx)
+        });
+
+        let mut titles = Vec::new();
+        for _ in 0..2 {
+            let fork = store
+                .update(cx, |store, cx| store.fork_session(&parent_id, false, cx))
+                .await
+                .expect("fork");
+            titles.push(fork.read_with(cx, |fork, _| fork.metadata().title.clone()));
+        }
+        let fork_of_fork_id = store
+            .update(cx, |store, cx| store.fork_session(&parent_id, false, cx))
+            .await
+            .map(|fork| session_id(&fork, cx))
+            .expect("fork");
+        let fork_of_fork = store
+            .update(cx, |store, cx| store.fork_session(&fork_of_fork_id, false, cx))
+            .await
+            .expect("fork of fork");
+        titles.push(fork_of_fork.read_with(cx, |fork, _| fork.metadata().title.clone()));
+
+        assert_eq!(titles, ["Chat (2)", "Chat (3)", "Chat (5)"]);
+    }
+
+    #[gpui::test]
+    async fn unlisted_models_stay_pickable_after_switching_away(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let ids = |selected: &str, cx: &mut TestAppContext| {
+            store.read_with(cx, |store, _| {
+                store
+                    .picker_models(AgentKind::Codex, Some(selected))
+                    .into_iter()
+                    .map(|model| model.id)
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(ids("gpt-6.1-sol", cx), ["gpt-6.1-sol"]);
+
+        store.update(cx, |store, _| {
+            store.remember_unlisted_model(AgentKind::Codex, "gpt-6.1-sol")
+        });
+        assert_eq!(ids("gpt-6-astra", cx), ["gpt-6-astra", "gpt-6.1-sol"]);
+        assert_eq!(ids("gpt-6.1-sol", cx), ["gpt-6.1-sol"]);
+    }
+
+    #[gpui::test]
+    async fn forks_copy_history_and_send_it_with_their_first_message(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let parent = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        parent.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        run_until(cx, |cx| parent.read_with(cx, |session, _| !session.is_working()));
+        parent.update(cx, |session, cx| {
+            session.update_settings(
+                |settings| settings.permission = PermissionMode::FullAccess,
+                cx,
+            )
+        });
+        let parent_id = session_id(&parent, cx);
+
+        let fork = store
+            .update(cx, |store, cx| store.fork_session(&parent_id, false, cx))
+            .await
+            .expect("fork");
+        fork.read_with(cx, |fork, cx| {
+            let summary = summarize(fork.entries(), cx);
+            assert_eq!(summary.first().map(String::as_str), Some("user: scenario:happy"));
+            assert!(summary.last().is_some_and(|last| last.starts_with("notice: Forked from")));
+            let context = fork.metadata().fork_context.clone().expect("history");
+            assert!(context.contains("scenario:happy") && context.contains("Hello"));
+            assert_eq!(fork.metadata().parent_id.as_deref(), Some(parent_id.as_str()));
+            assert!(!fork.metadata().side_chat);
+            assert_eq!(fork.settings().permission, PermissionMode::FullAccess);
+        });
+
+        let side = store
+            .update(cx, |store, cx| store.fork_session(&parent_id, true, cx))
+            .await
+            .expect("side chat");
+        side.read_with(cx, |side, cx| {
+            assert_eq!(summarize(side.entries(), cx).len(), 1);
+            assert!(side.metadata().side_chat);
+            assert!(side.metadata().fork_context.is_some());
+        });
+        side.update(cx, |side, cx| side.send_message("scenario:happy", cx));
+        run_until(cx, |cx| side.read_with(cx, |session, _| !session.is_working()));
+        side.read_with(cx, |side, _| assert!(side.metadata().fork_context.is_none()));
+    }
+
+    async fn forked_from_finished_parent(
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, Entity<AgentSession>) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let parent = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        parent.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        run_until(cx, |cx| {
+            parent.read_with(cx, |session, _| !session.is_working())
+        });
+        let parent_id = session_id(&parent, cx);
+        let fork = store
+            .update(cx, |store, cx| store.fork_session(&parent_id, false, cx))
+            .await
+            .expect("fork");
+        fork.read_with(cx, |fork, _| {
+            assert_eq!(fork.metadata().fork_source.as_deref(), Some("sess-1"));
+            assert!(fork.metadata().fork_context.is_some());
+        });
+        (directory, fork)
+    }
+
+    #[gpui::test]
+    async fn forks_continue_a_copy_of_the_agents_own_session(cx: &mut TestAppContext) {
+        let (_directory, fork) = forked_from_finished_parent(cx).await;
+        fork.update(cx, |fork, cx| fork.send_message("scenario:fork", cx));
+        run_until(cx, |cx| {
+            fork.read_with(cx, |session, _| !session.is_working())
+        });
+        fork.read_with(cx, |fork, cx| {
+            assert!(!fork.run_failed(), "{:?}", summarize(fork.entries(), cx));
+            assert_eq!(
+                fork.metadata().native_session_id.as_deref(),
+                Some("sess-forked")
+            );
+            assert!(fork.metadata().fork_source.is_none());
+            assert!(fork.metadata().fork_context.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn a_fork_drops_the_native_copy_once_its_parent_moves_on(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let parent = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        parent.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        run_until(cx, |cx| {
+            parent.read_with(cx, |session, _| !session.is_working())
+        });
+        let parent_id = session_id(&parent, cx);
+        let fork = store
+            .update(cx, |store, cx| store.fork_session(&parent_id, false, cx))
+            .await
+            .expect("fork");
+        fork.read_with(cx, |fork, _| assert!(fork.metadata().fork_source.is_some()));
+
+        parent.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        run_until(cx, |cx| {
+            parent.read_with(cx, |session, _| !session.is_working())
+        });
+        fork.read_with(cx, |fork, _| {
+            assert!(fork.metadata().fork_source.is_none());
+            assert!(
+                fork.metadata().fork_context.is_some(),
+                "the fork keeps its own history"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_failed_native_fork_falls_back_to_sending_the_history(cx: &mut TestAppContext) {
+        let (_directory, fork) = forked_from_finished_parent(cx).await;
+        fork.update(cx, |fork, cx| {
+            fork.send_message("scenario:fork-fallback", cx)
+        });
+        run_until(cx, |cx| {
+            fork.read_with(cx, |session, _| !session.is_working())
+        });
+        fork.read_with(cx, |fork, cx| {
+            let summary = summarize(fork.entries(), cx);
+            assert!(!fork.run_failed(), "{summary:?}");
+            assert!(
+                !fork
+                    .entries()
+                    .iter()
+                    .any(|entry| matches!(entry, Entry::Notice { is_error: true, .. })),
+                "the failed attempt stays out of the chat: {summary:?}"
+            );
+            assert_eq!(
+                fork.metadata().native_session_id.as_deref(),
+                Some("sess-fallback")
+            );
+            assert!(fork.metadata().fork_source.is_none());
+            assert!(fork.metadata().fork_context.is_none());
+        });
+    }
+
+    #[gpui::test]
+    async fn finished_runs_stay_unseen_until_viewed(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| session.send_message("scenario:happy", cx));
+        run_until(cx, |cx| session.read_with(cx, |session, _| !session.is_working()));
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.metadata().outcome, Some(ChatOutcome::Completed));
+            assert!(session.metadata().unseen);
+        });
+        session.update(cx, |session, cx| session.mark_seen(cx));
+        session.read_with(cx, |session, _| assert!(!session.metadata().unseen));
+    }
+
+    fn session_id(session: &Entity<AgentSession>, cx: &mut TestAppContext) -> String {
+        session.read_with(cx, |session, _| session.metadata().id.clone())
+    }
+
+    fn count_notifications<T: 'static>(
+        entity: &Entity<T>,
+        cx: &mut TestAppContext,
+    ) -> (std::rc::Rc<std::cell::Cell<usize>>, gpui::Subscription) {
+        let count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let subscription = cx.update(|cx| {
+            let count = count.clone();
+            cx.observe(entity, move |_, _| count.set(count.get() + 1))
+        });
+        (count, subscription)
+    }
+
+    fn text(text: &str) -> AgentEvent {
+        AgentEvent::TextDelta { text: text.into() }
+    }
+
+    fn finished_turn() -> AgentEvent {
+        AgentEvent::Done {
+            status: DoneStatus::Completed,
+            result: None,
+            error: None,
+            session_id: None,
+        }
+    }
+
+    fn exec_call(id: &str, command: &str) -> AgentEvent {
+        AgentEvent::ToolCall {
+            id: id.into(),
+            call: ToolCall::Exec {
+                command: command.into(),
+            },
+        }
+    }
+
+    fn tool_result(id: &str, output: &str) -> AgentEvent {
+        AgentEvent::ToolResult {
+            id: id.into(),
+            is_error: false,
+            output: Some(output.into()),
+            diff: None,
+        }
+    }
+
+    #[gpui::test]
+    async fn the_store_is_notified_of_state_changes_but_not_of_streamed_text(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        cx.run_until_parked();
+        let (notifications, _subscription) = count_notifications(&store, cx);
+
+        feed_events(&session, vec![text("one")], cx);
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 1, "starting to work shows in the list");
+
+        feed_events(
+            &session,
+            vec![
+                text(" two"),
+                exec_call("t1", "ls"),
+                tool_result("t1", "done"),
+                text("three"),
+            ],
+            cx,
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            notifications.get(),
+            1,
+            "streamed text and tools change nothing the store shows"
+        );
+
+        session.update(cx, |session, cx| {
+            session.pending_questions.push(PendingQuestion {
+                questions: Vec::new(),
+                responder: None,
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert_eq!(notifications.get(), 2, "a question shows in the list");
+
+        feed_events(&session, vec![finished_turn()], cx);
+        cx.run_until_parked();
+        assert!(notifications.get() > 2, "a finished turn shows in the list");
+        store.read_with(cx, |store, cx| {
+            let summaries = store.sessions_in(&[directory.path().to_path_buf()], cx);
+            assert!(!summaries[0].working);
+            assert!(summaries[0].unseen);
+        });
+    }
+
+    #[gpui::test]
+    async fn queued_agent_events_are_applied_together_and_in_order(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Codex, directory.path().to_path_buf(), cx)
+        });
+        cx.run_until_parked();
+        let (notifications, _subscription) = count_notifications(&session, cx);
+        let (responder, _answer) = tokio::sync::oneshot::channel();
+        let question = UserInputQuestion {
+            id: "q".into(),
+            header: "Choice".into(),
+            question: "Pick one".into(),
+            options: vec!["A".into()],
+            multi_select: false,
+            prefill: None,
+            multiline: false,
+            accepts_typed_answer: false,
+        };
+        let ended = session.update(cx, |session, cx| {
+            session.working = true;
+            session.apply_run_inputs(
+                vec![
+                    RunInput::Event(Ok(text("one"))),
+                    RunInput::Event(Ok(text(" two"))),
+                    RunInput::Event(Err(agent_harness::HarnessError::Protocol(
+                        "broken line".into(),
+                    ))),
+                    RunInput::Question {
+                        questions: vec![question],
+                        responder,
+                    },
+                    RunInput::Event(Ok(text("three"))),
+                    RunInput::Ended,
+                    RunInput::Event(Ok(text("late"))),
+                ],
+                cx,
+            )
+        });
+        assert!(
+            ended.is_break(),
+            "nothing after the end of the stream is applied"
+        );
+        cx.run_until_parked();
+        assert_eq!(
+            notifications.get(),
+            1,
+            "one batch wakes the chat's views once"
+        );
+        session.read_with(cx, |session, cx| {
+            let entries = summarize(session.entries(), cx);
+            assert_eq!(entries.len(), 3, "{entries:?}");
+            assert_eq!(entries[0], "assistant: one two");
+            assert!(entries[1].starts_with("notice: "), "{entries:?}");
+            assert_eq!(entries[2], "assistant: three");
+            assert_eq!(session.pending_questions().len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    async fn saved_chats_keep_their_file_format(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let user = |text: &str, at: i64| Entry::User {
+            text: text.to_string().into(),
+            at,
+            attachments: Vec::new(),
+            skills: Vec::new(),
+            undelivered: false,
+        };
+        session.update(cx, |session, cx| {
+            let languages = session.languages.clone();
+            let thought = new_markdown("hm".into(), &languages, cx);
+            let reply = new_markdown("Hello".into(), &languages, cx);
+            session.transcript.entries.extend([
+                user("hi", 1),
+                Entry::Thinking(thought),
+                Entry::Assistant {
+                    markdown: reply,
+                    at: 2,
+                },
+                Entry::Tool(ToolEntry {
+                    id: "t1".into(),
+                    call: ToolCall::Exec {
+                        command: "ls".into(),
+                    },
+                    status: ToolStatus::Completed,
+                    output: Some("ok".into()),
+                    diff: None,
+                }),
+                Entry::Notice {
+                    text: "note".into(),
+                    is_error: true,
+                },
+                Entry::Image {
+                    path: "/tmp/a.png".into(),
+                },
+            ]);
+            let mut subagent = Subagent::new();
+            subagent.transcript.entries.push(user("task", 3));
+            subagent.status = Some(DoneStatus::Completed);
+            session.subagents.insert("spawn-1".into(), subagent);
+            session.enqueue(Prompt::text("later"), cx);
+            session.touch(cx);
+        });
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        let path = entries_path(directory.path(), &session_id(&session, cx));
+        run_until(cx, |_| path.exists());
+
+        let saved = std::fs::read_to_string(&path).expect("saved chat");
+        assert_eq!(
+            saved,
+            concat!(
+                r#"{"entries":[{"type":"user","text":"hi","at":1},"#,
+                r#"{"type":"thinking","text":"hm"},"#,
+                r#"{"type":"assistant","text":"Hello","at":2},"#,
+                r#"{"type":"tool","id":"t1","call":{"kind":"exec","command":"ls"},"#,
+                r#""status":"completed","output":"ok"},"#,
+                r#"{"type":"notice","text":"note","is_error":true},"#,
+                r#"{"type":"image","path":"/tmp/a.png"}],"#,
+                r#""subagents":[{"id":"spawn-1","#,
+                r#""entries":[{"type":"user","text":"task","at":3}],"status":"completed"}],"#,
+                r#""queue":[{"text":"later"}]}"#,
+            )
+        );
+        let loaded: SavedTranscript = serde_json::from_str(&saved).expect("loads");
+        assert!(matches!(
+            loaded,
+            SavedTranscript::Current { entries, subagents, queue }
+                if entries.len() == 6 && subagents.len() == 1 && queue.len() == 1
+        ));
+    }
+
+    #[gpui::test]
+    async fn only_diffs_from_the_agent_are_saved(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let edit = ToolCall::EditFile {
+            path: "a.rs".into(),
+            old_string: Some("old".into()),
+            new_string: Some("new".into()),
+        };
+        let from_agent = agent_harness::ToolDiff {
+            path: "b.rs".into(),
+            old_text: Some("before".into()),
+            new_text: "after".into(),
+        };
+        feed_events(
+            &session,
+            vec![
+                AgentEvent::ToolCall {
+                    id: "edit".into(),
+                    call: edit.clone(),
+                },
+                AgentEvent::ToolResult {
+                    id: "edit".into(),
+                    is_error: false,
+                    output: None,
+                    diff: None,
+                },
+                AgentEvent::ToolCall {
+                    id: "patch".into(),
+                    call: ToolCall::ApplyPatch {
+                        path: Some("b.rs".into()),
+                    },
+                },
+                AgentEvent::ToolResult {
+                    id: "patch".into(),
+                    is_error: false,
+                    output: None,
+                    diff: Some(from_agent.clone()),
+                },
+                finished_turn(),
+            ],
+            cx,
+        );
+        let id = session_id(&session, cx);
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        let path = entries_path(directory.path(), &id);
+        run_until(cx, |_| path.exists());
+        cx.run_until_parked();
+
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("saved chat")).expect("json");
+        assert!(saved["entries"][0].get("diff").is_none(), "{saved}");
+        assert_eq!(saved["entries"][1]["diff"]["newText"], "after");
+
+        let reopened_store = new_store(directory.path(), cx);
+        cx.run_until_parked();
+        let reopened = reopened_store
+            .update(cx, |store, cx| store.open_session(&id, cx))
+            .await
+            .expect("chat reopens");
+        reopened.read_with(cx, |session, _| {
+            let diff = |id: &str| session.tool_entry(id).and_then(|tool| tool.diff.clone());
+            assert_eq!(diff("edit"), diff_for_call(&edit));
+            assert_eq!(diff("patch"), Some(from_agent.clone()));
+        });
+    }
+
+    #[gpui::test]
+    async fn saving_encodes_only_the_entries_that_changed(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let encode = |cx: &mut TestAppContext| {
+            session.update(cx, |session, cx| {
+                session.encoded_transcript(cx).expect("encodes").entries.0
+            })
+        };
+        feed_user(&session, "hi", cx);
+        feed_events(
+            &session,
+            vec![
+                text("one"),
+                AgentEvent::AssistantMessageCompleted {
+                    assistant_message_id: String::new(),
+                },
+                exec_call("t1", "ls"),
+                text("two"),
+            ],
+            cx,
+        );
+        let first = encode(cx);
+        feed_events(&session, vec![text(" more"), tool_result("t1", "done")], cx);
+        let second = encode(cx);
+
+        let reused = |index: usize| Arc::ptr_eq(&first[index].json, &second[index].json);
+        assert_eq!((first.len(), second.len()), (4, 4));
+        assert!(reused(0), "the message is not encoded again");
+        assert!(reused(1), "the finished reply is not encoded again");
+        assert!(!reused(2), "the finished tool is encoded again");
+        assert!(!reused(3), "the growing reply is encoded again");
+        assert!(second[3].json.get().contains("two more"));
+    }
+
+    fn assert_saves_in_full(session: &Entity<AgentSession>, cx: &mut TestAppContext) {
+        session.update(cx, |session, cx| {
+            let incremental =
+                serde_json::to_string(&session.encoded_transcript(cx).expect("encodes"))
+                    .expect("json");
+            let full = serde_json::to_string(&session.saved_transcript(cx)).expect("json");
+            assert_eq!(incremental, full);
+        });
+    }
+
+    #[gpui::test]
+    async fn every_kind_of_change_reaches_the_next_save(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Codex, directory.path().to_path_buf(), cx)
+        });
+        feed_user(&session, "first", cx);
+        feed_events(&session, vec![text("reply"), exec_call("t1", "ls")], cx);
+        assert_saves_in_full(&session, cx);
+
+        feed_events(&session, vec![exec_call("t1", "ls -la")], cx);
+        assert_saves_in_full(&session, cx);
+
+        feed_events(&session, vec![tool_result("t1", "done"), text("more")], cx);
+        assert_saves_in_full(&session, cx);
+
+        feed_subagent(&session, cx);
+        assert_saves_in_full(&session, cx);
+
+        session.update(cx, |session, cx| session.run_ended(cx));
+        assert_saves_in_full(&session, cx);
+
+        feed_user(&session, "second", cx);
+        session.update(cx, |session, cx| session.fail_run("no agent".into(), cx));
+        assert_saves_in_full(&session, cx);
+
+        session.update(cx, |session, _| {
+            let notice = session.transcript.entries.len() - 1;
+            session.transcript.remove(notice - 1..=notice);
+        });
+        feed_user(&session, "third", cx);
+        assert_saves_in_full(&session, cx);
+
+        session.update(cx, |session, _| {
+            let last = session.transcript.entries.len() - 1;
+            session.transcript.truncate(last);
+        });
+        feed_user(&session, "fourt", cx);
+        assert_saves_in_full(&session, cx);
+
+        enqueue(&session, "later", cx);
+        assert_saves_in_full(&session, cx);
+    }
+
+    #[gpui::test]
+    async fn saves_are_spaced_out_while_working_and_prompt_when_a_turn_ends(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let path = entries_path(directory.path(), &session_id(&session, cx));
+        let due = |cx: &mut TestAppContext| {
+            session.read_with(cx, |session, _| {
+                session
+                    .pending_entries_save
+                    .as_ref()
+                    .map(|pending| pending.due)
+            })
+        };
+
+        feed_events(&session, vec![text("one")], cx);
+        let first_due = due(cx);
+        assert!(first_due.is_some());
+        feed_events(&session, vec![text(" two"), text(" three")], cx);
+        assert_eq!(
+            due(cx),
+            first_due,
+            "more text waits for the save already pending"
+        );
+
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        cx.run_until_parked();
+        assert!(
+            !path.exists(),
+            "a working chat is not written at every pause"
+        );
+        cx.executor().advance_clock(SAVE_INTERVAL_WHILE_WORKING);
+        run_until(cx, |_| path.exists());
+        assert!(due(cx).is_none());
+
+        feed_events(&session, vec![text(" four"), finished_turn()], cx);
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        run_until(cx, |_| {
+            std::fs::read_to_string(&path).is_ok_and(|saved| saved.contains("four"))
+        });
+    }
+
+    #[gpui::test]
+    async fn unsaved_chats_are_written_when_the_app_quits(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        feed_user(&session, "question", cx);
+        feed_events(&session, vec![text("answer")], cx);
+        let path = entries_path(directory.path(), &session_id(&session, cx));
+        assert!(!path.exists());
+
+        store.update(cx, |store, cx| store.finish_saving(cx)).await;
+        let saved = std::fs::read_to_string(&path).expect("saved chat");
+        assert!(
+            saved.contains("question") && saved.contains("answer"),
+            "{saved}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn an_idle_agent_is_ended_and_the_next_message_resumes_it(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let script = directory.path().join("echo-args-claude");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+args="$*"
+printf '{"type":"system","subtype":"init","model":"m","tools":[],"cwd":"/tmp","session_id":"sess-args"}\n'
+while read -r line; do
+  printf '{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"%s"}}}\n' "$args"
+  printf '{"type":"assistant","parent_tool_use_id":null,"message":{"content":[]}}\n'
+  printf '{"type":"result","subtype":"success","result":"ok","errors":[],"usage":{"input_tokens":1,"output_tokens":1},"session_id":"sess-args"}\n'
+done
+"#,
+        )
+        .expect("write fixture");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+        let store = new_store(directory.path(), cx);
+        store.update(cx, |store, _| {
+            store.harnesses.insert(
+                AgentKind::Claude,
+                Arc::new(ClaudeHarness::new().with_executable(script)),
+            );
+        });
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let id = session_id(&session, cx);
+        session.update(cx, |session, cx| session.send_message("first", cx));
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+        });
+        let first = last_reply(&session, cx);
+        assert!(!first.contains("--resume"), "{first}");
+        session.read_with(cx, |session, _| assert!(session.run.is_some()));
+
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        let path = entries_path(directory.path(), &id);
+        run_until(cx, |_| path.exists());
+        cx.run_until_parked();
+
+        let next_check = store.update(cx, |store, cx| {
+            store.release_idle_sessions(IDLE_SESSION_TIMEOUT, cx)
+        });
+        assert!(next_check.is_some_and(|wait| wait <= IDLE_SESSION_TIMEOUT));
+        session.read_with(cx, |session, _| {
+            assert!(
+                session.run.is_some(),
+                "a chat used a moment ago keeps its agent"
+            )
+        });
+
+        let next_check = store.update(cx, |store, cx| {
+            store.release_idle_sessions(Duration::ZERO, cx)
+        });
+        assert_eq!(next_check, None);
+        session.read_with(cx, |session, _| assert!(session.run.is_none()));
+        store.read_with(cx, |store, _| {
+            assert!(!store.live.contains_key(&id));
+            assert!(store.released.contains_key(&id));
+        });
+
+        session.update(cx, |session, cx| session.send_message("second", cx));
+        run_until(cx, |cx| {
+            session.read_with(cx, |session, _| !session.is_working())
+                && last_reply(&session, cx) != first
+        });
+        let second = last_reply(&session, cx);
+        assert!(second.contains("--resume=sess-args"), "{second}");
+        store.read_with(cx, |store, _| assert!(store.live.contains_key(&id)));
+    }
+
+    #[gpui::test]
+    async fn an_agent_with_work_pending_is_not_ended(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        session.update(cx, |session, cx| {
+            let (steering, _) = tokio::sync::mpsc::channel(1);
+            session.run = Some(ActiveRun {
+                steering,
+                interrupt: CancellationToken::new(),
+                stopping_turn: false,
+                stop_acknowledged: None,
+                stop_timeout: None,
+                permission: tokio::sync::watch::channel(PermissionMode::Ask).0,
+                _events: Task::ready(()),
+            });
+            session.enqueue(Prompt::text("later"), cx);
+        });
+        let release = |cx: &mut TestAppContext| {
+            store.update(cx, |store, cx| {
+                store.release_idle_sessions(Duration::ZERO, cx)
+            })
+        };
+        assert_eq!(release(cx), Some(IDLE_RECHECK_INTERVAL));
+        session.read_with(cx, |session, _| {
+            assert!(session.run.is_some(), "a queued message keeps the agent")
+        });
+
+        session.update(cx, |session, cx| {
+            session.queue.clear();
+            session.apply_event(
+                AgentEvent::TaskStarted {
+                    task_id: "server".into(),
+                    tool_use_id: None,
+                    kind: agent_harness::BackgroundTaskKind::Agent,
+                    description: "dev server".into(),
+                },
+                cx,
+            );
+        });
+        assert_eq!(release(cx), Some(IDLE_RECHECK_INTERVAL));
+        session.read_with(cx, |session, _| {
+            assert!(session.run.is_some(), "a background task keeps the agent")
+        });
+
+        session.update(cx, |session, _| session.working = true);
+        assert_eq!(release(cx), None);
+        session.read_with(cx, |session, _| {
+            assert!(session.run.is_some(), "a working agent is left alone")
+        });
+    }
+
+    #[gpui::test]
+    async fn idle_chats_leave_memory_once_saved_and_reload_on_demand(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = new_store(directory.path(), cx);
+        let session = store.update(cx, |store, cx| {
+            store.create_session(AgentKind::Claude, directory.path().to_path_buf(), cx)
+        });
+        let id = session_id(&session, cx);
+        feed_user(&session, "remember me", cx);
+        session.update(cx, |session, cx| session.touch(cx));
+        let in_memory = session.downgrade();
+        drop(session);
+        let release = |cx: &mut TestAppContext| {
+            store.update(cx, |store, cx| {
+                store.release_idle_sessions(Duration::ZERO, cx)
+            })
+        };
+
+        assert_eq!(release(cx), Some(IDLE_RECHECK_INTERVAL));
+        assert!(
+            in_memory.upgrade().is_some(),
+            "a chat with unsaved changes stays in memory"
+        );
+
+        cx.executor().advance_clock(SAVE_DEBOUNCE * 2);
+        let path = entries_path(directory.path(), &id);
+        run_until(cx, |_| path.exists());
+        cx.run_until_parked();
+        assert_eq!(release(cx), None);
+        cx.run_until_parked();
+        assert!(in_memory.upgrade().is_none(), "a saved idle chat is let go");
+        store.read_with(cx, |store, cx| {
+            assert_eq!(
+                store
+                    .sessions_in(&[directory.path().to_path_buf()], cx)
+                    .len(),
+                1
+            );
+        });
+
+        let reopened = store
+            .update(cx, |store, cx| store.open_session(&id, cx))
+            .await
+            .expect("chat reloads");
+        assert_eq!(user_texts(&reopened, cx), ["remember me"]);
+    }
+}

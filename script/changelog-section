@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+# Prints the .github/release/CHANGELOG.md entries for one version, without the heading.
+# Fails if the section is missing or empty.
+#
+# Usage: script/changelog-section 1.0.8
+
+set -euo pipefail
+
+version=${1:?usage: script/changelog-section <version>}
+
+section=$(awk -v version="$version" '
+  /^## / {
+    if (found) exit
+    found = ($2 == version)
+    next
+  }
+  found { print }
+' .github/release/CHANGELOG.md)
+
+section=$(printf '%s\n' "$section" | sed -e '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}')
+
+if [[ -z "$section" ]]; then
+  echo ".github/release/CHANGELOG.md has no entries for version $version." >&2
+  exit 1
+fi
+
+printf '%s\n' "$section"

@@ -1,0 +1,187 @@
+#![cfg(target_os = "windows")]
+
+use std::{os::windows::ffi::OsStringExt, path::PathBuf};
+
+use windows::{
+    Win32::{
+        Foundation::{
+            CLASS_E_CLASSNOTAVAILABLE, E_FAIL, E_INVALIDARG, E_NOTIMPL, ERROR_INSUFFICIENT_BUFFER,
+            GetLastError, HINSTANCE, MAX_PATH,
+        },
+        Globalization::u_strlen,
+        System::{
+            Com::{IBindCtx, IClassFactory, IClassFactory_Impl},
+            LibraryLoader::GetModuleFileNameW,
+            SystemServices::DLL_PROCESS_ATTACH,
+        },
+        UI::Shell::{
+            ECF_DEFAULT, ECS_ENABLED, IEnumExplorerCommand, IExplorerCommand,
+            IExplorerCommand_Impl, IShellItemArray, SHStrDupW, SIGDN_FILESYSPATH,
+        },
+    },
+    core::{BOOL, GUID, HRESULT, HSTRING, Interface, Ref, Result, implement},
+};
+
+static mut DLL_INSTANCE: HINSTANCE = HINSTANCE(std::ptr::null_mut());
+
+#[unsafe(no_mangle)]
+extern "system" fn DllMain(
+    hinstdll: HINSTANCE,
+    fdwreason: u32,
+    _lpvreserved: *mut core::ffi::c_void,
+) -> bool {
+    if fdwreason == DLL_PROCESS_ATTACH {
+        unsafe { DLL_INSTANCE = hinstdll };
+    }
+
+    true
+}
+
+#[implement(IExplorerCommand)]
+struct ExplorerCommandInjector;
+
+#[allow(non_snake_case)]
+impl IExplorerCommand_Impl for ExplorerCommandInjector_Impl {
+    fn GetTitle(&self, _: Ref<IShellItemArray>) -> Result<windows_core::PWSTR> {
+        let command_description =
+            retrieve_command_description().unwrap_or(HSTRING::from("Open with Aaykra"));
+        unsafe { SHStrDupW(&command_description) }
+    }
+
+    fn GetIcon(&self, _: Ref<IShellItemArray>) -> Result<windows_core::PWSTR> {
+        let Some(zed_exe) = get_zed_exe_path() else {
+            return Err(E_FAIL.into());
+        };
+        unsafe { SHStrDupW(&HSTRING::from(zed_exe)) }
+    }
+
+    fn GetToolTip(&self, _: Ref<IShellItemArray>) -> Result<windows_core::PWSTR> {
+        Err(E_NOTIMPL.into())
+    }
+
+    fn GetCanonicalName(&self) -> Result<windows_core::GUID> {
+        Ok(GUID::zeroed())
+    }
+
+    fn GetState(&self, _: Ref<IShellItemArray>, _: BOOL) -> Result<u32> {
+        Ok(ECS_ENABLED.0 as _)
+    }
+
+    fn Invoke(&self, psiitemarray: Ref<IShellItemArray>, _: Ref<IBindCtx>) -> Result<()> {
+        let items = psiitemarray.ok()?;
+        let Some(zed_exe) = get_zed_exe_path() else {
+            return Ok(());
+        };
+
+        let count = unsafe { items.GetCount()? };
+        for idx in 0..count {
+            let item = unsafe { items.GetItemAt(idx)? };
+            let item_path = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH)?.to_string()? };
+            #[allow(clippy::disallowed_methods, reason = "no async context in sight..")]
+            std::process::Command::new(&zed_exe)
+                .arg(&item_path)
+                .spawn()
+                .map_err(|_| E_INVALIDARG)?;
+        }
+
+        Ok(())
+    }
+
+    fn GetFlags(&self) -> Result<u32> {
+        Ok(ECF_DEFAULT.0 as _)
+    }
+
+    fn EnumSubCommands(&self) -> Result<IEnumExplorerCommand> {
+        Err(E_NOTIMPL.into())
+    }
+}
+
+#[implement(IClassFactory)]
+struct ExplorerCommandInjectorFactory;
+
+impl IClassFactory_Impl for ExplorerCommandInjectorFactory_Impl {
+    fn CreateInstance(
+        &self,
+        punkouter: Ref<windows_core::IUnknown>,
+        riid: *const windows_core::GUID,
+        ppvobject: *mut *mut core::ffi::c_void,
+    ) -> Result<()> {
+        if ppvobject.is_null() || riid.is_null() {
+            return Err(windows::Win32::Foundation::E_POINTER.into());
+        }
+
+        unsafe {
+            *ppvobject = std::ptr::null_mut();
+        }
+
+        if punkouter.is_none() {
+            let factory: IExplorerCommand = ExplorerCommandInjector {}.into();
+            unsafe { factory.query(riid, ppvobject).ok() }
+        } else {
+            Err(E_INVALIDARG.into())
+        }
+    }
+
+    fn LockServer(&self, _: BOOL) -> Result<()> {
+        Ok(())
+    }
+}
+
+const MODULE_ID: GUID = cfg_select! {
+    feature = "stable" => { GUID::from_u128(0x1e6daf2f_4a3b_4d29_9ea7_ed82888c16a2) },
+    _ => { GUID::from_u128(0x13e28046_5ef0_4561_91a0_4a0e6296e211) },
+};
+
+#[unsafe(no_mangle)]
+extern "system" fn DllGetClassObject(
+    class_id: *const GUID,
+    iid: *const GUID,
+    out: *mut *mut std::ffi::c_void,
+) -> HRESULT {
+    if out.is_null() || class_id.is_null() || iid.is_null() {
+        return E_INVALIDARG;
+    }
+
+    unsafe {
+        *out = std::ptr::null_mut();
+    }
+    let class_id = unsafe { *class_id };
+    if class_id == MODULE_ID {
+        let instance: IClassFactory = ExplorerCommandInjectorFactory {}.into();
+        unsafe { instance.query(iid, out) }
+    } else {
+        CLASS_E_CLASSNOTAVAILABLE
+    }
+}
+
+fn get_zed_install_folder() -> Option<PathBuf> {
+    let mut buf = vec![0u16; MAX_PATH as usize];
+    unsafe { GetModuleFileNameW(Some(DLL_INSTANCE.into()), &mut buf) };
+
+    while unsafe { GetLastError() } == ERROR_INSUFFICIENT_BUFFER {
+        buf = vec![0u16; buf.len() * 2];
+        unsafe { GetModuleFileNameW(Some(DLL_INSTANCE.into()), &mut buf) };
+    }
+    let len = unsafe { u_strlen(buf.as_ptr()) };
+    let path: PathBuf = std::ffi::OsString::from_wide(&buf[..len as usize])
+        .into_string()
+        .ok()?
+        .into();
+    Some(path.parent()?.parent()?.to_path_buf())
+}
+
+#[inline]
+fn get_zed_exe_path() -> Option<String> {
+    get_zed_install_folder().map(|path| path.join("Aaykra.exe").to_string_lossy().into_owned())
+}
+
+#[inline]
+fn retrieve_command_description() -> Result<HSTRING> {
+    const REG_PATH: &str = cfg_select! {
+        feature = "stable" => { r#"Software\Classes\AaykraContextMenu"# },
+        _ => { r#"Software\Classes\AaykraDevContextMenu"# },
+    };
+
+    let key = windows_registry::CURRENT_USER.open(REG_PATH)?;
+    key.get_hstring("Title")
+}
