@@ -40,26 +40,8 @@ jobs:
         run: brew install lld
       - name: Use the stable release channel
         run: echo stable > crates/aaykra/RELEASE_CHANNEL
-      # With MACOS_CERTIFICATE alone the bundle is signed but not notarized.
-      # Without it the bundle is ad-hoc signed.
-      - name: Prepare provisioning profile
-        env:
-          MACOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
-        run: |
-          if [ -n "$MACOS_PROVISIONING_PROFILE_BASE64" ]; then
-            profile_path="$RUNNER_TEMP/embedded.provisionprofile"
-            echo "$MACOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$profile_path"
-            echo "MACOS_PROVISIONING_PROFILE=$profile_path" >> "$GITHUB_ENV"
-          fi
+      # Without signing secrets the bundle is ad-hoc signed.
       - name: Bundle
-        env:
-          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
-          APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
-          APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
-          APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
-          APPLE_NOTARIZATION_TEAM: ${{ secrets.APPLE_NOTARIZATION_TEAM }}
         run: script/bundle-mac ${{ matrix.arch }}-apple-darwin
       - name: Check that every string and command has its Chinese text
         if: matrix.arch == 'aarch64'
