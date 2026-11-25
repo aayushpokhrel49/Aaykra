@@ -1,1 +1,1 @@
-See [ReadMe](https://github.com/aayushpokhrel49/aaykra#download) for installation instructions.
+See [ReadMe](https://github.com/aayushpokhrel49/Aaykra#download) for installation instructions.

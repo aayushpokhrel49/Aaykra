@@ -15,7 +15,7 @@ Aaykra is a fast, native code editor written in Rust, with a clean, modern desig
 ## Features
 
 - ⚡ **Native and fast.** No Electron or webviews. Renders on the GPU.
-- 🍃 **Lightweight.** Lower memory footprint than VS Code and Zed. See [benchmarks](https://github.com/aayushpokhrel49/aaykra/blob/main/docs/memory-benchmark.md).
+- 🍃 **Lightweight.** Lower memory footprint than VS Code and Zed. See [benchmarks](https://github.com/aayushpokhrel49/Aaykra/blob/main/docs/memory-benchmark.md).
 - 👾 **Coding agents included.** Built-in support for Claude Code, Codex, OpenCode, and Antigravity.
 - ✨ **Beautiful by default.** Clean, modern look with a delightful UX.
 - 🤫 **Completely private.** No account or telemetry. Aaykra never sends your usage data anywhere.
@@ -28,18 +28,18 @@ On macOS and Linux, run:
 curl -fsSL https://code.aayushpokhrel.com.np/install.sh | sh
 ```
 
-For Windows, download the [installer](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/Aaykra-x86_64.exe).
+For Windows, download the [installer](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/Aaykra-x86_64.exe).
 
 <details>
 <summary>Or install manually</summary>
 
-- [macOS (Apple Silicon)](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/Aaykra-aarch64.dmg)
-- [macOS (Intel)](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/Aaykra-x86_64.dmg)
-- [Windows x86-64](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/Aaykra-x86_64.exe)
-- [Linux x86-64](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/aaykra-linux-x86_64.tar.gz)
-- [Linux AArch64](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/aaykra-linux-aarch64.tar.gz)
+- [macOS (Apple Silicon)](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/Aaykra-aarch64.dmg)
+- [macOS (Intel)](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/Aaykra-x86_64.dmg)
+- [Windows x86-64](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/Aaykra-x86_64.exe)
+- [Linux x86-64](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/aaykra-linux-x86_64.tar.gz)
+- [Linux AArch64](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/aaykra-linux-aarch64.tar.gz)
 
-See [INSTALL.md](https://github.com/aayushpokhrel49/aaykra/blob/main/docs/INSTALL.md) for more.
+See [INSTALL.md](https://github.com/aayushpokhrel49/Aaykra/blob/main/docs/INSTALL.md) for more.
 </details>
 
 ---

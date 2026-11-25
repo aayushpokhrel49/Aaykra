@@ -350,7 +350,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action(
                     t!("Aaykra Repository"),
                     super::OpenBrowser {
-                        url: "https://github.com/aayushpokhrel49/aaykra".into(),
+                        url: "https://github.com/aayushpokhrel49/Aaykra".into(),
                     },
                 ),
             ],

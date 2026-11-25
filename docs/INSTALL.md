@@ -1,12 +1,12 @@
 ## Install
 
-All releases are available [here](https://github.com/aayushpokhrel49/aaykra/releases/latest).
+All releases are available [here](https://github.com/aayushpokhrel49/Aaykra/releases/latest).
 
 ### macOS (Apple Silicon and Intel)
 
 1. Download the installer for your Mac, open it, and drag Aaykra into your Applications folder.
-    - [**Apple Silicon**](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/Aaykra-aarch64.dmg) (M1 and later)
-    - [**Intel**](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/Aaykra-x86_64.dmg)
+    - [**Apple Silicon**](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/Aaykra-aarch64.dmg) (M1 and later)
+    - [**Intel**](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/Aaykra-x86_64.dmg)
 
    Aaykra is not signed with an Apple Developer certificate yet, so macOS will block it the first time you open it.
 2. Open Terminal and run:
@@ -49,8 +49,8 @@ It installs Aaykra into `~/.local`, adds the `aaykra` command, and adds Aaykra t
 #### Manual install
 
 1. Download the tarball for your platform.
-    - [**Linux x86-64**](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/aaykra-linux-x86_64.tar.gz)
-    - [**Linux AArch64**](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/aaykra-linux-aarch64.tar.gz)
+    - [**Linux x86-64**](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/aaykra-linux-x86_64.tar.gz)
+    - [**Linux AArch64**](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/aaykra-linux-aarch64.tar.gz)
 
 2. Unpack its contents into `~/.local`:
 
@@ -71,4 +71,4 @@ WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 aaykra
 
 ### Windows (x86-64)
 
-Download the [installer](https://github.com/aayushpokhrel49/aaykra/releases/latest/download/Aaykra-x86_64.exe) and click to run. The installer isn't code-signed, so Windows SmartScreen may warn you. Click **More info**, then **Run anyway**.
+Download the [installer](https://github.com/aayushpokhrel49/Aaykra/releases/latest/download/Aaykra-x86_64.exe) and click to run. The installer isn't code-signed, so Windows SmartScreen may warn you. Click **More info**, then **Run anyway**.

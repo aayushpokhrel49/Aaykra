@@ -32,10 +32,10 @@
     <content_rating type="oars-1.1" />
 
     <url type="homepage">https://code.aayushpokhrel.com.np</url>
-    <url type="bugtracker">https://github.com/aayushpokhrel49/aaykra/issues</url>
+    <url type="bugtracker">https://github.com/aayushpokhrel49/Aaykra/issues</url>
     <url type="help">https://code.aayushpokhrel.com.np/docs</url>
-    <url type="contact">https://github.com/aayushpokhrel49/aaykra/issues</url>
-    <url type="vcs-browser">https://github.com/aayushpokhrel49/aaykra</url>
+    <url type="contact">https://github.com/aayushpokhrel49/Aaykra/issues</url>
+    <url type="vcs-browser">https://github.com/aayushpokhrel49/Aaykra</url>
 
     <supports>
         <internet>offline-only</internet>

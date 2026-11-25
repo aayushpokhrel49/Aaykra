@@ -98,4 +98,4 @@ fi
 
 git push --quiet origin main
 git push --quiet origin "$tag"
-echo "Pushed. Watch the release at https://github.com/aayushpokhrel49/aaykra/actions/workflows/release.yml"
+echo "Pushed. Watch the release at https://github.com/aayushpokhrel49/Aaykra/actions/workflows/release.yml"

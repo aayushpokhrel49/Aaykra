@@ -9,7 +9,7 @@ main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
     channel="${AAYKRA_CHANNEL:-${ZED_CHANNEL:-stable}}"
-    repo="aayushpokhrel49/aaykra"
+    repo="aayushpokhrel49/Aaykra"
     version="${AAYKRA_VERSION:-${ZED_VERSION:-latest}}"
     bundle_path="${AAYKRA_BUNDLE_PATH:-${ZED_BUNDLE_PATH:-}}"
     if [ "$version" = "latest" ]; then

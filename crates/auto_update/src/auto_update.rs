@@ -231,7 +231,7 @@ pub struct ReleaseAsset {
     pub digest: Option<String>,
 }
 
-const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/aayushpokhrel49/aaykra/releases";
+const GITHUB_RELEASES_API_URL: &str = "https://api.github.com/repos/aayushpokhrel49/Aaykra/releases";
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -413,9 +413,9 @@ pub fn release_notes_url(cx: &mut App) -> Option<String> {
             let mut current_version = auto_updater.current_version.clone();
             current_version.pre = semver::Prerelease::EMPTY;
             current_version.build = semver::BuildMetadata::EMPTY;
-            format!("https://github.com/aayushpokhrel49/aaykra/releases/tag/v{current_version}")
+            format!("https://github.com/aayushpokhrel49/Aaykra/releases/tag/v{current_version}")
         }
-        ReleaseChannel::Dev => "https://github.com/aayushpokhrel49/aaykra/commits/main/".to_string(),
+        ReleaseChannel::Dev => "https://github.com/aayushpokhrel49/Aaykra/commits/main/".to_string(),
     };
     Some(url)
 }
