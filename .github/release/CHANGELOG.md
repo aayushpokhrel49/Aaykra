@@ -4,6 +4,12 @@ All notable user-facing changes to Aaykra are listed here, newest first.
 
 ## Unreleased
 
+## 1.6.0 - 2026-11-25
+
+- Make the shipped Aaykra Dark, Aaykra Dark Translucent, and Aaykra Light themes match the Aaykra theme family exactly.
+- Show all application menus in the title bar by default instead of the hamburger menu.
+- Use the renamed `aayushpokhrel49/Aaykra` repository for updates, downloads, and links.
+
 ## 1.5.0 - 2026-11-22
 
 - Add support Antigravity.
