@@ -105,7 +105,7 @@ pub struct TitleBarSettingsContent {
     pub show_project_items: Option<bool>,
     /// Whether to show the menus in the title bar.
     ///
-    /// Default: false
+    /// Default: true
     pub show_menus: Option<bool>,
     /// The layout of window control buttons in the title bar (Linux only).
     ///
